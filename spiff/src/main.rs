@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use memmap2::Mmap;
 
+use libdiff::MatchedDiff;
 use std::{fs::File, io::Write};
 
 fn main() -> Result<()> {
@@ -21,44 +22,51 @@ fn main() -> Result<()> {
     let lines2: Vec<&[u8]> = map2.split(|x| *x == b'\n').collect();
 
     let diff = libdiff::diff(&lines1, &lines2);
-    let mut idx = 0;
-    for action in diff.actions() {
+    let MatchedDiff { diff, matches } = libdiff::match_insertions_removals(diff, &lines1, &lines2);
+    for (action_idx, action) in diff.into_iter().enumerate() {
         match action {
-            libdiff::DiffAction::Traverse(n) => {
-                for line in lines1.iter().skip(idx).take(*n) {
+            libdiff::DiffAction::Traverse(traversal) => {
+                for line in lines1.iter().skip(traversal.a_idx).take(traversal.length) {
                     print!(" ");
                     std::io::stdout()
                         .write_all(line)
                         .context("Failed to write to stdout")?;
                     println!();
                 }
-                idx += n;
             }
-            libdiff::DiffAction::Remove(n) => {
-                print!("{}", ansi_term::Color::Red.prefix());
-                for line in lines1.iter().skip(idx).take(*n) {
+            libdiff::DiffAction::Remove(removal) => {
+                let colour = if matches.contains_key(&action_idx) {
+                    ansi_term::Colour::Yellow
+                } else {
+                    ansi_term::Colour::Red
+                };
+                print!("{}", colour.prefix());
+                for line in lines1.iter().skip(removal.a_idx).take(removal.length) {
                     print!("-");
                     std::io::stdout()
                         .write_all(line)
                         .context("Failed to write to stdout")?;
                     println!();
                 }
-                print!("{}", ansi_term::Color::Red.suffix());
-                idx += n;
+                print!("{}", colour.suffix());
             }
-            libdiff::DiffAction::Insert {
-                starting_index,
-                num_items,
-            } => {
-                print!("{}", ansi_term::Color::Green.prefix());
-                for line in lines2.iter().skip(*starting_index).take(*num_items) {
+            libdiff::DiffAction::Insert(insertion) => {
+                let colour = if matches.contains_key(&action_idx) {
+                    ansi_term::Colour::Blue
+                } else {
+                    ansi_term::Colour::Green
+                };
+                print!("{}", colour.prefix());
+
+                for line in lines2.iter().skip(insertion.b_idx).take(insertion.length) {
                     print!("+");
                     std::io::stdout()
                         .write_all(line)
                         .context("Failed to write to stdout")?;
                     println!();
                 }
-                print!("{}", ansi_term::Color::Green.suffix());
+
+                print!("{}", colour.suffix());
             }
         }
     }
