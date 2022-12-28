@@ -6,7 +6,7 @@ use eframe::{
     },
     epaint::FontId,
 };
-use libdiff::{DiffAction, MatchedDiff};
+use libdiff::{DiffAction, MatchedDiffs};
 use memmap2::Mmap;
 
 use std::fmt::Write as FmtWrite;
@@ -132,10 +132,18 @@ impl DiffView {
             libdiff::diff(&trimmed_lines_a, &trimmed_lines_b)
         };
 
-        let (diff, matches) = if options.track_moves {
-            let MatchedDiff { diff, matches } =
-                libdiff::match_insertions_removals(diff, &lines_a, &lines_b);
-            (diff, matches)
+        let (diff, matches): (Vec<DiffAction>, _) = if options.track_moves {
+            let MatchedDiffs { mut diffs, matches } =
+                libdiff::match_insertions_removals([diff].to_vec(), &[&lines_a], &[&lines_b]);
+            let matches = matches
+                .into_iter()
+                .map(|((idx, x), (idx2, y))| {
+                    assert_eq!(idx, 0);
+                    assert_eq!(idx, idx2);
+                    (x, y)
+                })
+                .collect::<std::collections::HashMap<usize, usize>>();
+            (diffs.pop().unwrap(), matches)
         } else {
             (diff, [].into())
         };

@@ -156,17 +156,22 @@ where
 
 /// Splits a sequence of diff actions into the insertions and removals that makes it up. Discards
 /// traversals
-fn insertions_removals_from_actions(d: &[DiffAction]) -> (Vec<Insertion>, Vec<Removal>) {
+#[allow(clippy::type_complexity)]
+fn insertions_removals_from_actions(
+    diffs: &[Vec<DiffAction>],
+) -> (Vec<(usize, Insertion)>, Vec<(usize, Removal)>) {
     let mut insertions = Vec::new();
     let mut removals = Vec::new();
-    for action in d {
-        match action {
-            DiffAction::Traverse(_) => {}
-            DiffAction::Insert(insertion) => {
-                insertions.push(insertion.clone());
-            }
-            DiffAction::Remove(removal) => {
-                removals.push(removal.clone());
+    for (idx, diff) in diffs.iter().enumerate() {
+        for action in diff {
+            match action {
+                DiffAction::Traverse(_) => {}
+                DiffAction::Insert(insertion) => {
+                    insertions.push((idx, insertion.clone()));
+                }
+                DiffAction::Remove(removal) => {
+                    removals.push((idx, removal.clone()));
+                }
             }
         }
     }
@@ -192,17 +197,19 @@ where
 
 /// Splits input insertion and removal to get segments with either a 100% match score or a 0% match
 /// score
+#[allow(clippy::type_complexity)]
 fn split_insertion_removal_pair<U>(
-    insertion: &Insertion,
-    removal: &Removal,
-    a: &[U],
-    b: &[U],
-) -> (Vec<Insertion>, Vec<Removal>)
+    insertion: &(usize, Insertion),
+    removal: &(usize, Removal),
+    a: &[&[U]],
+    b: &[&[U]],
+) -> (Vec<(usize, Insertion)>, Vec<(usize, Removal)>)
 where
     U: Eq + PartialEq,
 {
-    let insertion_content = &b[insertion.b_idx..insertion.b_idx + insertion.length];
-    let removal_content = &a[removal.a_idx..removal.a_idx + removal.length];
+    let insertion_content =
+        &b[insertion.0][insertion.1.b_idx..insertion.1.b_idx + insertion.1.length];
+    let removal_content = &a[removal.0][removal.1.a_idx..removal.1.a_idx + removal.1.length];
 
     // If we diff the diff, we should find traversal segments which indicate 100% overlap. Each
     // insertion will correspond to one of the split insertions, each removal will correspond to
@@ -215,26 +222,38 @@ where
     for action in insertion_removal_diff {
         match action {
             DiffAction::Traverse(traversal) => {
-                output_insertions.push(Insertion {
-                    b_idx: insertion.b_idx + traversal.b_idx,
-                    length: traversal.length,
-                });
-                output_removals.push(Removal {
-                    a_idx: removal.a_idx + traversal.a_idx,
-                    length: traversal.length,
-                });
+                output_insertions.push((
+                    insertion.0,
+                    Insertion {
+                        b_idx: insertion.1.b_idx + traversal.b_idx,
+                        length: traversal.length,
+                    },
+                ));
+                output_removals.push((
+                    removal.0,
+                    Removal {
+                        a_idx: removal.1.a_idx + traversal.a_idx,
+                        length: traversal.length,
+                    },
+                ));
             }
             DiffAction::Insert(diff_insertion) => {
-                output_insertions.push(Insertion {
-                    b_idx: insertion.b_idx + diff_insertion.b_idx,
-                    length: diff_insertion.length,
-                });
+                output_insertions.push((
+                    insertion.0,
+                    Insertion {
+                        b_idx: insertion.1.b_idx + diff_insertion.b_idx,
+                        length: diff_insertion.length,
+                    },
+                ));
             }
             DiffAction::Remove(diff_removal) => {
-                output_removals.push(Removal {
-                    a_idx: removal.a_idx + diff_removal.a_idx,
-                    length: diff_removal.length,
-                });
+                output_removals.push((
+                    removal.0,
+                    Removal {
+                        a_idx: removal.1.a_idx + diff_removal.a_idx,
+                        length: diff_removal.length,
+                    },
+                ));
             }
         }
     }
@@ -251,24 +270,25 @@ fn replace_element_with_sequence<U: Eq + PartialEq>(elem: &U, seq: Vec<U>, vec: 
 struct MatchCandidate {
     // Order of elements important for ordering
     score: usize,
-    insertion: Insertion,
-    removal: Removal,
+    insertion: (usize, Insertion),
+    removal: (usize, Removal),
 }
 
 /// Calculate scores between all insertions and removals
 ///
 /// Return all candidates where any lines match
 fn calculate_match_scores<U: Eq + PartialEq>(
-    insertions: &[Insertion],
-    removals: &[Removal],
-    a: &[U],
-    b: &[U],
+    insertions: &[(usize, Insertion)],
+    removals: &[(usize, Removal)],
+    a: &[&[U]],
+    b: &[&[U]],
 ) -> BinaryHeap<MatchCandidate> {
     let mut match_candidates = BinaryHeap::new();
 
     for insertion in insertions {
         for removal in removals {
-            let score = calculate_match_score(insertion, removal, a, b);
+            let score =
+                calculate_match_score(&insertion.1, &removal.1, a[removal.0], b[insertion.0]);
 
             if score > 0 {
                 match_candidates.push(MatchCandidate {
@@ -283,16 +303,23 @@ fn calculate_match_scores<U: Eq + PartialEq>(
     match_candidates
 }
 
-pub struct MatchedDiff {
-    /// Diff sequence
-    pub diff: Vec<DiffAction>,
+pub struct MatchedDiffs {
+    /// Sequence of diff sequences
+    /// Inner vec is a sequence of actions that has to be applied to get from a to b
+    /// Outer vec is a collection of different diffs for different files
+    pub diffs: Vec<Vec<DiffAction>>,
     /// Indexes in diff that correspond to other indexes in diff
-    pub matches: HashMap<usize, usize>,
+    /// Items are (diff_idx, seq_idx)
+    pub matches: HashMap<(usize, usize), (usize, usize)>,
 }
 
 /// Find moves within the provided diff. Split long segments into smaller segments that can be
 /// matched
-pub fn match_insertions_removals<U>(mut d: Vec<DiffAction>, a: &[U], b: &[U]) -> MatchedDiff
+pub fn match_insertions_removals<U>(
+    mut d: Vec<Vec<DiffAction>>,
+    a: &[&[U]],
+    b: &[&[U]],
+) -> MatchedDiffs
 where
     U: Eq + PartialEq,
 {
@@ -333,19 +360,24 @@ where
             );
 
             replace_element_with_sequence(
-                &DiffAction::Remove(match_candidate.removal.clone()),
+                &DiffAction::Remove(match_candidate.removal.1.clone()),
                 split_removals
                     .iter()
                     .cloned()
-                    .map(DiffAction::Remove)
+                    .map(|x| DiffAction::Remove(x.1))
                     .collect(),
-                &mut d,
+                &mut d[match_candidate.removal.0],
             );
 
             // Re-compute scores of new removals with all insertions
             for removal in split_removals {
                 for insertion in &insertions {
-                    let score = calculate_match_score(insertion, &removal, a, b);
+                    let score = calculate_match_score(
+                        &insertion.1,
+                        &removal.1,
+                        a[removal.0],
+                        b[insertion.0],
+                    );
 
                     if score > 0 {
                         match_candidates.push(MatchCandidate {
@@ -372,19 +404,24 @@ where
             );
 
             replace_element_with_sequence(
-                &DiffAction::Insert(match_candidate.insertion.clone()),
+                &DiffAction::Insert(match_candidate.insertion.1.clone()),
                 split_insertions
                     .iter()
                     .cloned()
-                    .map(DiffAction::Insert)
+                    .map(|x| DiffAction::Insert(x.1))
                     .collect(),
-                &mut d,
+                &mut d[match_candidate.insertion.0],
             );
 
             // Re-compute scores of new insertions with all insertions
             for insertion in split_insertions {
                 for removal in &removals {
-                    let score = calculate_match_score(&insertion, removal, a, b);
+                    let score = calculate_match_score(
+                        &insertion.1,
+                        &removal.1,
+                        a[removal.0],
+                        b[insertion.0],
+                    );
 
                     if score > 0 {
                         match_candidates.push(MatchCandidate {
@@ -406,18 +443,24 @@ where
 
     let mut matches = HashMap::new();
     for (insertion, removal) in insertion_matches {
-        let insertion_pos = d
+        let insertion_pos = d[insertion.0]
             .iter()
-            .position(|i| *i == DiffAction::Insert(insertion.clone()));
-        let removal_pos = d
+            .position(|i| *i == DiffAction::Insert(insertion.1.clone()));
+        let removal_pos = d[removal.0]
             .iter()
-            .position(|i| *i == DiffAction::Remove(removal.clone()));
+            .position(|i| *i == DiffAction::Remove(removal.1.clone()));
 
-        matches.insert(insertion_pos.unwrap(), removal_pos.unwrap());
-        matches.insert(removal_pos.unwrap(), insertion_pos.unwrap());
+        matches.insert(
+            (insertion.0, insertion_pos.unwrap()),
+            (removal.0, removal_pos.unwrap()),
+        );
+        matches.insert(
+            (removal.0, removal_pos.unwrap()),
+            (insertion.0, insertion_pos.unwrap()),
+        );
     }
 
-    MatchedDiff { diff: d, matches }
+    MatchedDiffs { diffs: d, matches }
 }
 
 #[cfg(test)]
@@ -438,8 +481,9 @@ mod test {
             })]
         );
 
-        let MatchedDiff { diff, matches } = match_insertions_removals(d.clone(), &a, &b);
-        let d2 = diff;
+        let MatchedDiffs { mut diffs, matches } =
+            match_insertions_removals(vec![d.clone()], &[&a], &[&b]);
+        let d2 = diffs.pop().unwrap();
 
         assert_eq!(d, d2);
         assert_eq!(matches.len(), 0);
@@ -474,13 +518,14 @@ mod test {
             ]
         );
 
-        let MatchedDiff { diff, matches } = match_insertions_removals(d.clone(), &a, &b);
-        let d2 = diff;
+        let MatchedDiffs { mut diffs, matches } =
+            match_insertions_removals(vec![d.clone()], &[&a], &[&b]);
+        let d2 = diffs.pop().unwrap();
 
         assert_eq!(d, d2);
         assert_eq!(matches.len(), 2);
-        assert_eq!(matches.get(&1), Some(&3));
-        assert_eq!(matches.get(&3), Some(&1));
+        assert_eq!(matches.get(&(0, 1)), Some(&(0, 3)));
+        assert_eq!(matches.get(&(0, 3)), Some(&(0, 1)));
     }
 
     #[test]
@@ -512,8 +557,9 @@ mod test {
             ]
         );
 
-        let MatchedDiff { diff, matches } = match_insertions_removals(d.clone(), &a, &b);
-        let d2 = diff;
+        let MatchedDiffs { mut diffs, matches } =
+            match_insertions_removals(vec![d.clone()], &[&a], &[&b]);
+        let d2 = diffs.pop().unwrap();
 
         assert_eq!(d, d2);
         assert_eq!(matches.len(), 0);
@@ -548,8 +594,9 @@ mod test {
             ]
         );
 
-        let MatchedDiff { diff, matches } = match_insertions_removals(d.clone(), &a, &b);
-        let d2 = diff;
+        let MatchedDiffs { mut diffs, matches } =
+            match_insertions_removals(vec![d.clone()], &[&a], &[&b]);
+        let d2 = diffs.pop().unwrap();
 
         assert_eq!(d, d2);
         assert_eq!(matches.len(), 0);
@@ -568,8 +615,9 @@ mod test {
             })]
         );
 
-        let MatchedDiff { diff, matches } = match_insertions_removals(d.clone(), &a, &b);
-        let d2 = diff;
+        let MatchedDiffs { mut diffs, matches } =
+            match_insertions_removals(vec![d.clone()], &[&a], &[&b]);
+        let d2 = diffs.pop().unwrap();
 
         assert_eq!(d, d2);
         assert_eq!(matches.len(), 0);
@@ -595,8 +643,9 @@ mod test {
             ]
         );
 
-        let MatchedDiff { diff, matches } = match_insertions_removals(d.clone(), &a, &b);
-        let d2 = diff;
+        let MatchedDiffs { mut diffs, matches } =
+            match_insertions_removals(vec![d.clone()], &[&a], &[&b]);
+        let d2 = diffs.pop().unwrap();
 
         assert_eq!(d, d2);
         assert_eq!(matches.len(), 0);
@@ -621,8 +670,9 @@ mod test {
             ]
         );
 
-        let MatchedDiff { diff, matches } = match_insertions_removals(d.clone(), &a, &b);
-        let d2 = diff;
+        let MatchedDiffs { mut diffs, matches } =
+            match_insertions_removals(vec![d.clone()], &[&a], &[&b]);
+        let d2 = diffs.pop().unwrap();
 
         assert_eq!(d, d2);
         assert_eq!(matches.len(), 0);
@@ -657,13 +707,14 @@ mod test {
             ]
         );
 
-        let MatchedDiff { diff, matches } = match_insertions_removals(d.clone(), &a, &b);
-        let d2 = diff;
+        let MatchedDiffs { mut diffs, matches } =
+            match_insertions_removals(vec![d.clone()], &[&a], &[&b]);
+        let d2 = diffs.pop().unwrap();
 
         assert_eq!(d, d2);
         assert_eq!(matches.len(), 2);
-        assert_eq!(matches.get(&1), Some(&3));
-        assert_eq!(matches.get(&3), Some(&1));
+        assert_eq!(matches.get(&(0, 1)), Some(&(0, 3)));
+        assert_eq!(matches.get(&(0, 3)), Some(&(0, 1)));
     }
 
     #[test]
@@ -695,8 +746,9 @@ mod test {
             ]
         );
 
-        let MatchedDiff { diff, matches } = match_insertions_removals(d.clone(), &a, &b);
-        let d2 = diff;
+        let MatchedDiffs { mut diffs, matches } =
+            match_insertions_removals(vec![d.clone()], &[&a], &[&b]);
+        let d2 = diffs.pop().unwrap();
 
         assert_eq!(
             d2,
@@ -731,10 +783,10 @@ mod test {
         );
 
         assert_eq!(matches.len(), 4);
-        assert_eq!(matches.get(&1), Some(&5));
-        assert_eq!(matches.get(&5), Some(&1));
-        assert_eq!(matches.get(&2), Some(&4));
-        assert_eq!(matches.get(&4), Some(&2));
+        assert_eq!(matches.get(&(0, 1)), Some(&(0, 5)));
+        assert_eq!(matches.get(&(0, 5)), Some(&(0, 1)));
+        assert_eq!(matches.get(&(0, 2)), Some(&(0, 4)));
+        assert_eq!(matches.get(&(0, 4)), Some(&(0, 2)));
     }
 
     #[test]
@@ -775,8 +827,9 @@ mod test {
             ]
         );
 
-        let MatchedDiff { diff, matches } = match_insertions_removals(d.clone(), &a, &b);
-        let d2 = diff;
+        let MatchedDiffs { mut diffs, matches } =
+            match_insertions_removals(vec![d.clone()], &[&a], &[&b]);
+        let d2 = diffs.pop().unwrap();
 
         assert_eq!(
             d2,
@@ -816,10 +869,10 @@ mod test {
         );
 
         assert_eq!(matches.len(), 4);
-        assert_eq!(matches.get(&1), Some(&3));
-        assert_eq!(matches.get(&3), Some(&1));
-        assert_eq!(matches.get(&4), Some(&6));
-        assert_eq!(matches.get(&6), Some(&4));
+        assert_eq!(matches.get(&(0, 1)), Some(&(0, 3)));
+        assert_eq!(matches.get(&(0, 3)), Some(&(0, 1)));
+        assert_eq!(matches.get(&(0, 4)), Some(&(0, 6)));
+        assert_eq!(matches.get(&(0, 6)), Some(&(0, 4)));
     }
 
     #[test]
@@ -851,8 +904,9 @@ mod test {
             ]
         );
 
-        let MatchedDiff { diff, matches } = match_insertions_removals(d.clone(), &a, &b);
-        let d2 = diff;
+        let MatchedDiffs { mut diffs, matches } =
+            match_insertions_removals(vec![d.clone()], &[&a], &[&b]);
+        let d2 = diffs.pop().unwrap();
 
         assert_eq!(
             d2,
@@ -891,10 +945,10 @@ mod test {
         );
 
         assert_eq!(matches.len(), 4);
-        assert_eq!(matches.get(&0), Some(&5));
-        assert_eq!(matches.get(&5), Some(&0));
-        assert_eq!(matches.get(&1), Some(&4));
-        assert_eq!(matches.get(&4), Some(&1));
+        assert_eq!(matches.get(&(0, 0)), Some(&(0, 5)));
+        assert_eq!(matches.get(&(0, 5)), Some(&(0, 0)));
+        assert_eq!(matches.get(&(0, 1)), Some(&(0, 4)));
+        assert_eq!(matches.get(&(0, 4)), Some(&(0, 1)));
     }
 
     #[test]
@@ -931,8 +985,9 @@ mod test {
             ]
         );
 
-        let MatchedDiff { diff, matches } = match_insertions_removals(d.clone(), &a, &b);
-        let d2 = diff;
+        let MatchedDiffs { mut diffs, matches } =
+            match_insertions_removals(vec![d.clone()], &[&a], &[&b]);
+        let d2 = diffs.pop().unwrap();
 
         assert_eq!(
             d2,
@@ -976,9 +1031,100 @@ mod test {
         );
 
         assert_eq!(matches.len(), 4);
-        assert_eq!(matches.get(&1), Some(&4));
-        assert_eq!(matches.get(&4), Some(&1));
-        assert_eq!(matches.get(&2), Some(&6));
-        assert_eq!(matches.get(&6), Some(&2));
+        assert_eq!(matches.get(&(0, 1)), Some(&(0, 4)));
+        assert_eq!(matches.get(&(0, 4)), Some(&(0, 1)));
+        assert_eq!(matches.get(&(0, 2)), Some(&(0, 6)));
+        assert_eq!(matches.get(&(0, 6)), Some(&(0, 2)));
+    }
+
+    #[test]
+    fn cross_file_move() {
+        let a1 = [1, 2, 3, 4, 5, 6, 7, 8];
+        let b1 = [1, 2, 3, 4, 7, 8];
+        let a2 = [1, 2, 3];
+        let b2 = [1, 2, 5, 6, 3];
+        let diffs = [diff(&a1, &b1), diff(&a2, &b2)];
+        assert_eq!(
+            diffs,
+            [
+                vec![
+                    DiffAction::Traverse(Traversal {
+                        a_idx: 0,
+                        b_idx: 0,
+                        length: 4
+                    }),
+                    DiffAction::Remove(Removal {
+                        a_idx: 4,
+                        length: 2
+                    }),
+                    DiffAction::Traverse(Traversal {
+                        a_idx: 6,
+                        b_idx: 4,
+                        length: 2
+                    }),
+                ],
+                vec![
+                    DiffAction::Traverse(Traversal {
+                        a_idx: 0,
+                        b_idx: 0,
+                        length: 2
+                    }),
+                    DiffAction::Insert(Insertion {
+                        b_idx: 2,
+                        length: 2
+                    }),
+                    DiffAction::Traverse(Traversal {
+                        a_idx: 2,
+                        b_idx: 4,
+                        length: 1
+                    }),
+                ]
+            ]
+        );
+
+        let MatchedDiffs { diffs, matches } =
+            match_insertions_removals(diffs.to_vec(), &[a1.as_slice(), &a2], &[&b1, &b2]);
+
+        assert_eq!(
+            diffs,
+            [
+                vec![
+                    DiffAction::Traverse(Traversal {
+                        a_idx: 0,
+                        b_idx: 0,
+                        length: 4
+                    }),
+                    DiffAction::Remove(Removal {
+                        a_idx: 4,
+                        length: 2
+                    }),
+                    DiffAction::Traverse(Traversal {
+                        a_idx: 6,
+                        b_idx: 4,
+                        length: 2
+                    }),
+                ],
+                vec![
+                    DiffAction::Traverse(Traversal {
+                        a_idx: 0,
+                        b_idx: 0,
+                        length: 2
+                    }),
+                    DiffAction::Insert(Insertion {
+                        b_idx: 2,
+                        length: 2
+                    }),
+                    DiffAction::Traverse(Traversal {
+                        a_idx: 2,
+                        b_idx: 4,
+                        length: 1
+                    }),
+                ]
+            ]
+        );
+
+        assert_eq!(matches.len(), 2);
+        assert_eq!(matches.get(&(0, 1)), Some(&(1, 1)));
+        assert_eq!(matches.get(&(1, 1)), Some(&(0, 1)));
     }
 }

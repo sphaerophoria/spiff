@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 
-use libdiff::MatchedDiff;
+use libdiff::MatchedDiffs;
 
 fn main() -> Result<()> {
     let path1 = std::env::args()
@@ -17,7 +17,17 @@ fn main() -> Result<()> {
     let lines2 = spiff::buf_to_lines(&file2).unwrap();
 
     let diff = libdiff::diff(&lines1, &lines2);
-    let MatchedDiff { diff, matches } = libdiff::match_insertions_removals(diff, &lines1, &lines2);
+    let MatchedDiffs { mut diffs, matches } =
+        libdiff::match_insertions_removals([diff].to_vec(), &[&lines1], &[&lines2]);
+    let diff = diffs.pop().unwrap();
+    let matches = matches
+        .into_iter()
+        .map(|((idx, x), (idx2, y))| {
+            assert_eq!(idx, 0);
+            assert_eq!(idx, idx2);
+            (x, y)
+        })
+        .collect::<std::collections::HashMap<usize, usize>>();
     for (action_idx, action) in diff.into_iter().enumerate() {
         match action {
             libdiff::DiffAction::Traverse(traversal) => {
