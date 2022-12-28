@@ -11,3 +11,5 @@ ansi_term = "0.12.1"
 libdiff = { path = "../libdiff" }
 memmap2 = "0.5.8"
 lexopt = "0.2.1"
+eframe = "0.20.1"
+rfd = "0.10.0"

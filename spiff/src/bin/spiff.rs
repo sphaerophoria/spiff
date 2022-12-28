@@ -1,8 +1,6 @@
 use anyhow::{Context, Result};
-use memmap2::Mmap;
 
 use libdiff::MatchedDiff;
-use std::{fs::File, io::Write};
 
 fn main() -> Result<()> {
     let path1 = std::env::args()
@@ -12,14 +10,11 @@ fn main() -> Result<()> {
         .nth(2)
         .context("Path for file 2 not provided")?;
 
-    let file1 = File::open(path1).context("Failed to open file 1")?;
-    let file2 = File::open(path2).context("Failed to open file 2")?;
+    let file1 = spiff::open_file(path1).unwrap();
+    let file2 = spiff::open_file(path2).unwrap();
 
-    let map1 = unsafe { Mmap::map(&file1) }.context("Failed to map file 1")?;
-    let map2 = unsafe { Mmap::map(&file2) }.context("Failed to map file 2")?;
-
-    let lines1: Vec<&[u8]> = map1.split(|x| *x == b'\n').collect();
-    let lines2: Vec<&[u8]> = map2.split(|x| *x == b'\n').collect();
+    let lines1 = spiff::buf_to_lines(&file1).unwrap();
+    let lines2 = spiff::buf_to_lines(&file2).unwrap();
 
     let diff = libdiff::diff(&lines1, &lines2);
     let MatchedDiff { diff, matches } = libdiff::match_insertions_removals(diff, &lines1, &lines2);
@@ -28,10 +23,7 @@ fn main() -> Result<()> {
             libdiff::DiffAction::Traverse(traversal) => {
                 for line in lines1.iter().skip(traversal.a_idx).take(traversal.length) {
                     print!(" ");
-                    std::io::stdout()
-                        .write_all(line)
-                        .context("Failed to write to stdout")?;
-                    println!();
+                    println!("{}", line);
                 }
             }
             libdiff::DiffAction::Remove(removal) => {
@@ -43,10 +35,7 @@ fn main() -> Result<()> {
                 print!("{}", colour.prefix());
                 for line in lines1.iter().skip(removal.a_idx).take(removal.length) {
                     print!("-");
-                    std::io::stdout()
-                        .write_all(line)
-                        .context("Failed to write to stdout")?;
-                    println!();
+                    println!("{}", line);
                 }
                 print!("{}", colour.suffix());
             }
@@ -60,10 +49,7 @@ fn main() -> Result<()> {
 
                 for line in lines2.iter().skip(insertion.b_idx).take(insertion.length) {
                     print!("+");
-                    std::io::stdout()
-                        .write_all(line)
-                        .context("Failed to write to stdout")?;
-                    println!();
+                    println!("{}", line);
                 }
 
                 print!("{}", colour.suffix());
