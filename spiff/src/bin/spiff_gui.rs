@@ -182,12 +182,16 @@ impl DiffView {
         let trimmed_lines_b = trim_lines(&lines_b);
 
         for i in 0..a_bufs.len() {
+            let begin = std::time::Instant::now();
             let diff = if options.consider_whitespace {
                 libdiff::diff(&lines_a[i], &lines_b[i])
             } else {
                 libdiff::diff(&trimmed_lines_a[i], &trimmed_lines_b[i])
             };
-
+            let duration = (std::time::Instant::now() - begin).as_millis();
+            if duration > 300 {
+                println!("Diffing {} took {}", labels[i], duration);
+            }
             diff_sequences.push(diff);
         }
 

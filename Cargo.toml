@@ -4,3 +4,6 @@ members = [
   "spiff"
 ]
 
+[profile.release-with-debug]
+inherits = "release"
+debug = true

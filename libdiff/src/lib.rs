@@ -1,6 +1,5 @@
 use std::{
     cmp::{Eq, PartialEq},
-    collections::VecDeque,
     collections::{BinaryHeap, HashMap, HashSet},
 };
 
@@ -43,6 +42,9 @@ pub enum DiffAction {
 }
 
 /// Helper struct to build a DiffAction sequence
+///
+/// Sequence is expected to be built in reverse order as we back-track through our path generated
+/// by the myers diff algorithm
 #[derive(Clone, Default, Debug, Eq, PartialEq)]
 struct DiffBuilder {
     seq: Vec<DiffAction>,
@@ -54,9 +56,9 @@ impl DiffBuilder {
     /// If the last element is already a traversal its length will be amended
     fn push_traversed_item(&mut self, a_idx: usize, b_idx: usize) {
         if let Some(DiffAction::Traverse(traversal)) = self.seq.last_mut() {
-            if traversal.a_idx == a_idx - traversal.length
-                && traversal.b_idx == b_idx - traversal.length
-            {
+            if traversal.a_idx == a_idx + 1 && traversal.b_idx == b_idx + 1 {
+                traversal.a_idx -= 1;
+                traversal.b_idx -= 1;
                 traversal.length += 1;
                 return;
             }
@@ -74,7 +76,8 @@ impl DiffBuilder {
     /// If the last element is already an insertion its length will be amended
     fn push_insertion(&mut self, b_idx: usize) {
         if let Some(DiffAction::Insert(insertion)) = self.seq.last_mut() {
-            if insertion.b_idx == b_idx - insertion.length {
+            if insertion.b_idx == b_idx + 1 {
+                insertion.b_idx -= 1;
                 insertion.length += 1;
                 return;
             }
@@ -89,7 +92,8 @@ impl DiffBuilder {
     /// If the last element is already a removal its length will be amended
     fn push_removal(&mut self, a_idx: usize) {
         if let Some(DiffAction::Remove(removal)) = self.seq.last_mut() {
-            if removal.a_idx == a_idx - removal.length {
+            if removal.a_idx == a_idx + 1 {
+                removal.a_idx -= 1;
                 removal.length += 1;
                 return;
             }
@@ -105,53 +109,90 @@ pub fn diff<U>(a: &[U], b: &[U]) -> Vec<DiffAction>
 where
     U: Eq + PartialEq,
 {
-    let mut visited = HashSet::new();
-    let mut tails = VecDeque::new();
-    tails.push_back((0, 0, DiffBuilder::default()));
+    // Myers diff algorithm, no splitting into smaller segments
+    //
+    // http://www.xmailserver.org/diff2.pdf
+    // https://blog.jcoglan.com/2017/02/12/the-myers-diff-algorithm-part-1/
+    let max_distance = a.len() + b.len();
+    let mut best_x_for_k: Vec<i64> = vec![0; max_distance * 2 + 1];
+    let mut trace = Vec::new();
 
-    // Myers diff algorithm
-    // BFS where traversals are free
-    while let Some((a_idx, b_idx, diff)) = tails.pop_front() {
-        // If we've already been here it means we have a shorter path to this node
-        if visited.contains(&(a_idx, b_idx)) {
-            continue;
-        }
-        visited.insert((a_idx, b_idx));
+    let max_distance = max_distance as i64;
 
-        // Reached the end of the graph, we're done
-        if a_idx == a.len() && b_idx == b.len() {
-            return diff.seq;
-        }
+    'outer: for d in 0..=max_distance {
+        trace.push(best_x_for_k.clone());
+        for k in (-d..=d).step_by(2) {
+            let idx: usize = (k + max_distance).try_into().unwrap();
 
-        // Traversals are free, so we traverse them greedily
-        {
-            let mut new_diff = diff.clone();
-            let mut a_idx = a_idx;
-            let mut b_idx = b_idx;
-            while a_idx < a.len() && b_idx < b.len() && a[a_idx] == b[b_idx] {
-                new_diff.push_traversed_item(a_idx, b_idx);
-                visited.insert((a_idx, b_idx));
-                a_idx += 1;
-                b_idx += 1;
+            let mut x = if k == -d || (k != d && best_x_for_k[idx - 1] < best_x_for_k[idx + 1]) {
+                best_x_for_k[idx + 1]
+            } else {
+                best_x_for_k[idx - 1] + 1
+            };
+
+            let mut y = x - k;
+            assert!(y >= 0);
+
+            while x < a.len() as i64 && y < b.len() as i64 && a[x as usize] == b[y as usize] {
+                x += 1;
+                y += 1;
             }
-            tails.push_back((a_idx, b_idx, new_diff));
-        }
 
-        // And add on the removal/insertions
-        if a.len() > a_idx {
-            let mut new_diff = diff.clone();
-            new_diff.push_removal(a_idx);
-            tails.push_back((a_idx + 1, b_idx, new_diff));
-        }
+            best_x_for_k[idx] = x;
 
-        if b.len() > b_idx {
-            let mut new_diff = diff.clone();
-            new_diff.push_insertion(b_idx);
-            tails.push_back((a_idx, b_idx + 1, new_diff));
+            if x >= a.len() as i64 && y >= b.len() as i64 {
+                break 'outer;
+            }
         }
     }
 
-    unreachable!();
+    let mut path = Vec::new();
+    let mut x = a.len() as i64;
+    let mut y = b.len() as i64;
+
+    let mut builder = DiffBuilder::default();
+
+    for (d, best_x_for_k) in trace.iter().enumerate().rev() {
+        let d = d as i64;
+        let k = x - y;
+        let idx: usize = (k + max_distance).try_into().unwrap();
+
+        let prev_k = if k == -d || (k != d && best_x_for_k[idx - 1] < best_x_for_k[idx + 1]) {
+            k + 1
+        } else {
+            k - 1
+        };
+
+        let prev_idx: usize = (prev_k + max_distance).try_into().unwrap();
+        let prev_x = best_x_for_k[prev_idx];
+        let prev_y = prev_x - prev_k;
+
+        while x > prev_x && y > prev_y {
+            x -= 1;
+            y -= 1;
+            if y < 0 {
+                y = 0
+            };
+            path.push((x, y));
+            builder.push_traversed_item(x as usize, y as usize);
+        }
+
+        if d > 0 {
+            if prev_y == y {
+                builder.push_removal(prev_x as usize);
+            } else if prev_x == x {
+                builder.push_insertion(prev_y as usize);
+            } else {
+                panic!();
+            }
+        }
+
+        x = prev_x;
+        y = prev_y;
+    }
+
+    builder.seq.reverse();
+    builder.seq
 }
 
 /// Splits a sequence of diff actions into the insertions and removals that makes it up. Discards
@@ -341,12 +382,23 @@ where
     let mut insertion_matches = HashMap::new();
     let mut removal_matches = HashSet::new();
 
+    let mut ignored_removals = HashSet::new();
+    let mut ignored_insertions = HashSet::new();
+
     while let Some(match_candidate) = match_candidates.pop() {
         if insertion_matches.contains_key(&match_candidate.insertion) {
             continue;
         }
 
         if removal_matches.contains(&match_candidate.removal) {
+            continue;
+        }
+
+        if ignored_removals.contains(&match_candidate.removal) {
+            continue;
+        }
+
+        if ignored_insertions.contains(&match_candidate.insertion) {
             continue;
         }
 
@@ -401,10 +453,7 @@ where
             }
 
             // Remove dangling candidates
-            match_candidates = match_candidates
-                .into_iter()
-                .filter(|candidate| candidate.removal != match_candidate.removal)
-                .collect();
+            ignored_removals.insert(match_candidate.removal);
         }
 
         if split_insertions.len() > 1 {
@@ -445,10 +494,7 @@ where
             }
 
             // Remove dangling candidates
-            match_candidates = match_candidates
-                .into_iter()
-                .filter(|candidate| candidate.insertion != match_candidate.insertion)
-                .collect();
+            ignored_insertions.insert(match_candidate.insertion);
         }
     }
 
