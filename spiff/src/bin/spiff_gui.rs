@@ -89,11 +89,19 @@ impl eframe::App for Spiff {
     }
 }
 
+#[derive(Eq, PartialEq)]
+enum ViewMode {
+    AOnly,
+    BOnly,
+    Unified,
+}
+
 struct DiffOptions {
     context_lines: usize,
     track_moves: bool,
     consider_whitespace: bool,
     line_numbers: bool,
+    view_mode: ViewMode,
 }
 
 impl Default for DiffOptions {
@@ -103,6 +111,7 @@ impl Default for DiffOptions {
             consider_whitespace: true,
             track_moves: true,
             line_numbers: true,
+            view_mode: ViewMode::Unified,
         }
     }
 }
@@ -122,6 +131,16 @@ impl DiffOptions {
 
             changed |= ui
                 .checkbox(&mut self.line_numbers, "Line Numbers")
+                .changed();
+
+            changed |= ui
+                .radio_value(&mut self.view_mode, ViewMode::AOnly, "A Only")
+                .changed();
+            changed |= ui
+                .radio_value(&mut self.view_mode, ViewMode::BOnly, "B Only")
+                .changed();
+            changed |= ui
+                .radio_value(&mut self.view_mode, ViewMode::Unified, "Unified")
                 .changed();
 
             changed
@@ -362,6 +381,10 @@ impl DiffProcessor<'_> {
     }
 
     fn process_insertion(&mut self, insertion: &libdiff::Insertion, idx: usize) {
+        if self.options.view_mode == ViewMode::AOnly {
+            return;
+        }
+
         let color = if self.matches.contains_key(&(self.diff_idx, idx)) {
             Color32::LIGHT_BLUE
         } else {
@@ -384,6 +407,10 @@ impl DiffProcessor<'_> {
     }
 
     fn process_removal(&mut self, removal: &libdiff::Removal, idx: usize) {
+        if self.options.view_mode == ViewMode::BOnly {
+            return;
+        }
+
         let start_length = self.processed_diff.len();
 
         let color = if self.matches.contains_key(&(self.diff_idx, idx)) {
