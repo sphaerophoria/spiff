@@ -250,7 +250,10 @@ impl DiffProcessor<'_> {
                     .skip(traversal.a_idx)
                     .take(self.options.context_lines)
                 {
-                    self.process_line_numbers(Some(idx), Some((idx as i64 + b_idx_offset) as usize));
+                    self.process_line_numbers(
+                        Some(idx),
+                        Some((idx as i64 + b_idx_offset) as usize),
+                    );
                     writeln!(self.processed_diff, " {}", line).expect("Failed to write line");
                 }
             }
@@ -280,8 +283,10 @@ impl DiffProcessor<'_> {
                 writeln!(self.processed_diff, " {}", line).expect("Failed to write line");
             }
         }
-        self.coloring
-            .push((start_length..self.processed_diff.len(), visuals.text_color()));
+        self.coloring.push((
+            start_length..self.processed_diff.len(),
+            visuals.text_color(),
+        ));
     }
 
     fn process_insertion(&mut self, insertion: &libdiff::Insertion, idx: usize) {
