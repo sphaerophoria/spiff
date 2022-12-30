@@ -338,21 +338,21 @@ impl DiffProcessor<'_> {
     ) {
         let visuals = Visuals::default();
 
-        let b_idx_offset = traversal.b_idx as i64 - traversal.a_idx as i64;
+        let a_idx_offset = traversal.a_idx as i64 - traversal.b_idx as i64;
         let start_length = self.processed_diff.len();
 
         if traversal.length > self.options.context_lines * 2 {
             if show_start {
                 for (idx, line) in self
-                    .lines_a
+                    .lines_b
                     .iter()
                     .enumerate()
-                    .skip(traversal.a_idx)
+                    .skip(traversal.b_idx)
                     .take(self.options.context_lines)
                 {
                     self.process_line_numbers(
+                        Some((idx as i64 + a_idx_offset) as usize),
                         Some(idx),
-                        Some((idx as i64 + b_idx_offset) as usize),
                     );
                     writeln!(self.processed_diff, " {}", line).expect("Failed to write line");
                 }
@@ -363,28 +363,28 @@ impl DiffProcessor<'_> {
 
             if show_end {
                 for (idx, line) in self
-                    .lines_a
+                    .lines_b
                     .iter()
                     .enumerate()
-                    .skip(traversal.a_idx + traversal.length - self.options.context_lines)
+                    .skip(traversal.b_idx + traversal.length - self.options.context_lines)
                     .take(self.options.context_lines)
                 {
                     self.process_line_numbers(
+                        Some((idx as i64 + a_idx_offset) as usize),
                         Some(idx),
-                        Some((idx as i64 + b_idx_offset) as usize),
                     );
                     writeln!(self.processed_diff, " {}", line).expect("Failed to write line");
                 }
             }
         } else {
             for (idx, line) in self
-                .lines_a
+                .lines_b
                 .iter()
                 .enumerate()
-                .skip(traversal.a_idx)
+                .skip(traversal.b_idx)
                 .take(traversal.length)
             {
-                self.process_line_numbers(Some(idx), Some((idx as i64 + b_idx_offset) as usize));
+                self.process_line_numbers(Some((idx as i64 + a_idx_offset) as usize), Some(idx));
                 writeln!(self.processed_diff, " {}", line).expect("Failed to write line");
             }
         }
