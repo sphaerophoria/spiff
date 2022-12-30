@@ -198,18 +198,20 @@ where
 /// Splits input insertion and removal to get segments with either a 100% match score or a 0% match
 /// score
 #[allow(clippy::type_complexity)]
-fn split_insertion_removal_pair<U>(
+fn split_insertion_removal_pair<U, C>(
     insertion: &(usize, Insertion),
     removal: &(usize, Removal),
-    a: &[&[U]],
-    b: &[&[U]],
+    a: &[C],
+    b: &[C],
 ) -> (Vec<(usize, Insertion)>, Vec<(usize, Removal)>)
 where
     U: Eq + PartialEq,
+    C: AsRef<[U]>,
 {
     let insertion_content =
-        &b[insertion.0][insertion.1.b_idx..insertion.1.b_idx + insertion.1.length];
-    let removal_content = &a[removal.0][removal.1.a_idx..removal.1.a_idx + removal.1.length];
+        &b[insertion.0].as_ref()[insertion.1.b_idx..insertion.1.b_idx + insertion.1.length];
+    let removal_content =
+        &a[removal.0].as_ref()[removal.1.a_idx..removal.1.a_idx + removal.1.length];
 
     // If we diff the diff, we should find traversal segments which indicate 100% overlap. Each
     // insertion will correspond to one of the split insertions, each removal will correspond to
@@ -277,18 +279,26 @@ struct MatchCandidate {
 /// Calculate scores between all insertions and removals
 ///
 /// Return all candidates where any lines match
-fn calculate_match_scores<U: Eq + PartialEq>(
+fn calculate_match_scores<U, C>(
     insertions: &[(usize, Insertion)],
     removals: &[(usize, Removal)],
-    a: &[&[U]],
-    b: &[&[U]],
-) -> BinaryHeap<MatchCandidate> {
+    a: &[C],
+    b: &[C],
+) -> BinaryHeap<MatchCandidate>
+where
+    U: PartialEq + Eq,
+    C: AsRef<[U]>,
+{
     let mut match_candidates = BinaryHeap::new();
 
     for insertion in insertions {
         for removal in removals {
-            let score =
-                calculate_match_score(&insertion.1, &removal.1, a[removal.0], b[insertion.0]);
+            let score = calculate_match_score(
+                &insertion.1,
+                &removal.1,
+                a[removal.0].as_ref(),
+                b[insertion.0].as_ref(),
+            );
 
             if score > 0 {
                 match_candidates.push(MatchCandidate {
@@ -315,13 +325,14 @@ pub struct MatchedDiffs {
 
 /// Find moves within the provided diff. Split long segments into smaller segments that can be
 /// matched
-pub fn match_insertions_removals<U>(
+pub fn match_insertions_removals<'a, U, C>(
     mut d: Vec<Vec<DiffAction>>,
-    a: &[&[U]],
-    b: &[&[U]],
+    a: &[C],
+    b: &[C],
 ) -> MatchedDiffs
 where
-    U: Eq + PartialEq,
+    U: Eq + PartialEq + 'a,
+    C: AsRef<[U]>,
 {
     let (mut insertions, mut removals) = insertions_removals_from_actions(&d);
 
@@ -375,8 +386,8 @@ where
                     let score = calculate_match_score(
                         &insertion.1,
                         &removal.1,
-                        a[removal.0],
-                        b[insertion.0],
+                        a[removal.0].as_ref(),
+                        b[insertion.0].as_ref(),
                     );
 
                     if score > 0 {
@@ -419,8 +430,8 @@ where
                     let score = calculate_match_score(
                         &insertion.1,
                         &removal.1,
-                        a[removal.0],
-                        b[insertion.0],
+                        a[removal.0].as_ref(),
+                        b[insertion.0].as_ref(),
                     );
 
                     if score > 0 {
@@ -595,7 +606,7 @@ mod test {
         );
 
         let MatchedDiffs { mut diffs, matches } =
-            match_insertions_removals(vec![d.clone()], &[&a], &[&b]);
+            match_insertions_removals(vec![d.clone()], &[a.as_slice()], &[b.as_slice()]);
         let d2 = diffs.pop().unwrap();
 
         assert_eq!(d, d2);
@@ -616,7 +627,7 @@ mod test {
         );
 
         let MatchedDiffs { mut diffs, matches } =
-            match_insertions_removals(vec![d.clone()], &[&a], &[&b]);
+            match_insertions_removals(vec![d.clone()], &[a.as_slice()], &[b.as_slice()]);
         let d2 = diffs.pop().unwrap();
 
         assert_eq!(d, d2);
@@ -644,7 +655,7 @@ mod test {
         );
 
         let MatchedDiffs { mut diffs, matches } =
-            match_insertions_removals(vec![d.clone()], &[&a], &[&b]);
+            match_insertions_removals(vec![d.clone()], &[a.as_slice()], &[b.as_slice()]);
         let d2 = diffs.pop().unwrap();
 
         assert_eq!(d, d2);
@@ -905,7 +916,7 @@ mod test {
         );
 
         let MatchedDiffs { mut diffs, matches } =
-            match_insertions_removals(vec![d.clone()], &[&a], &[&b]);
+            match_insertions_removals(vec![d.clone()], &[a.as_slice()], &[b.as_slice()]);
         let d2 = diffs.pop().unwrap();
 
         assert_eq!(
@@ -986,7 +997,7 @@ mod test {
         );
 
         let MatchedDiffs { mut diffs, matches } =
-            match_insertions_removals(vec![d.clone()], &[&a], &[&b]);
+            match_insertions_removals(vec![d.clone()], &[a.as_slice()], &[b.as_slice()]);
         let d2 = diffs.pop().unwrap();
 
         assert_eq!(

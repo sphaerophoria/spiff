@@ -1,15 +1,20 @@
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use eframe::{
     egui::{
-        self, text::LayoutJob, Color32, Context as EContext, Label, RichText, ScrollArea, Slider,
-        TextEdit, TextFormat, Ui, Visuals,
+        self, text::LayoutJob, CollapsingHeader, Color32, Context as EContext, Label, RichText,
+        ScrollArea, Slider, TextEdit, TextFormat, Ui, Visuals,
     },
     epaint::FontId,
 };
-use libdiff::{DiffAction, MatchedDiffs};
+use libdiff::DiffAction;
 use memmap2::Mmap;
 
-use std::fmt::Write as FmtWrite;
+use std::{
+    collections::BTreeSet,
+    fmt::Write as FmtWrite,
+    fs,
+    path::{Path, PathBuf},
+};
 
 fn main() -> Result<()> {
     let native_options = eframe::NativeOptions::default();
@@ -22,8 +27,9 @@ fn main() -> Result<()> {
 }
 
 struct Spiff {
-    content_a: Mmap,
-    content_b: Mmap,
+    content_a: Vec<Option<Mmap>>,
+    content_b: Vec<Option<Mmap>>,
+    labels: Vec<String>,
     options: DiffOptions,
     diff_view: Result<DiffView>,
 }
@@ -34,16 +40,22 @@ impl Spiff {
         // Restore app state using cc.storage (requires the "persistence" feature).
         // Use the cc.gl (a glow::Context) to create graphics shaders and buffers that you can use
         // for e.g. egui::PaintCallback.
-        let path_1 = std::env::args().nth(1).unwrap();
-        let path_2 = std::env::args().nth(2).unwrap();
-        let content_a = spiff::open_file(path_1).unwrap();
-        let content_b = spiff::open_file(path_2).unwrap();
+        let root_a = Path::new(&std::env::args().nth(1).unwrap()).to_path_buf();
+        let root_b = Path::new(&std::env::args().nth(2).unwrap()).to_path_buf();
+
+        let Contents {
+            content_a,
+            content_b,
+            labels,
+        } = contents_from_roots(root_a, root_b).unwrap();
+
         let options = DiffOptions::default();
-        let diff_view = DiffView::new(&content_a, &content_b, &options);
+        let diff_view = DiffView::new(&content_a, &content_b, &labels, &options);
 
         Spiff {
             content_a,
             content_b,
+            labels,
             options,
             diff_view,
         }
@@ -55,7 +67,12 @@ impl eframe::App for Spiff {
         egui::CentralPanel::default().show(ctx, |ui| {
             let new_options = self.options.show(ui);
             if new_options {
-                self.diff_view = DiffView::new(&self.content_a, &self.content_b, &self.options);
+                self.diff_view = DiffView::new(
+                    &self.content_a,
+                    &self.content_b,
+                    &self.labels,
+                    &self.options,
+                );
             }
 
             match self.diff_view.as_mut() {
@@ -113,101 +130,147 @@ impl DiffOptions {
     }
 }
 
-struct DiffView {
+struct DiffViewFileData {
+    label: String,
     processed_diff: String,
     line_numbers: String,
     coloring: Vec<(std::ops::Range<usize>, Color32)>,
 }
 
+struct DiffView {
+    diffs: Vec<DiffViewFileData>,
+}
+
 impl DiffView {
-    fn new(a: &[u8], b: &[u8], options: &DiffOptions) -> Result<DiffView> {
-        let lines_a = spiff::buf_to_lines(a).context("Failed to split file A by line")?;
-        let lines_b = spiff::buf_to_lines(b).context("Failed to split file B by line")?;
-        let trimmed_lines_a = lines_a.iter().map(|x| x.trim()).collect::<Vec<_>>();
-        let trimmed_lines_b = lines_b.iter().map(|x| x.trim()).collect::<Vec<_>>();
+    // Nasty generics to allow Mmap -> &[u8] coercion
+    fn new<C>(
+        a_bufs: &[Option<C>],
+        b_bufs: &[Option<C>],
+        labels: &[String],
+        options: &DiffOptions,
+    ) -> Result<DiffView>
+    where
+        C: AsRef<[u8]>,
+    {
+        assert_eq!(a_bufs.len(), labels.len());
+        assert_eq!(a_bufs.len(), b_bufs.len());
 
-        let diff = if options.consider_whitespace {
-            libdiff::diff(&lines_a, &lines_b)
-        } else {
-            libdiff::diff(&trimmed_lines_a, &trimmed_lines_b)
-        };
+        let mut diff_sequences = Vec::new();
+        let lines_a = bufs_to_lines(a_bufs)?;
+        let lines_b = bufs_to_lines(b_bufs)?;
 
-        let (diff, matches): (Vec<DiffAction>, _) = if options.track_moves {
-            let MatchedDiffs { mut diffs, matches } =
-                libdiff::match_insertions_removals([diff].to_vec(), &[&lines_a], &[&lines_b]);
-            let matches = matches
-                .into_iter()
-                .map(|((idx, x), (idx2, y))| {
-                    assert_eq!(idx, 0);
-                    assert_eq!(idx, idx2);
-                    (x, y)
-                })
-                .collect::<std::collections::HashMap<usize, usize>>();
-            (diffs.pop().unwrap(), matches)
-        } else {
-            (diff, [].into())
-        };
+        let trimmed_lines_a = trim_lines(&lines_a);
+        let trimmed_lines_b = trim_lines(&lines_b);
 
-        let (processed_diff, line_numbers, coloring) = DiffProcessor {
-            lines_a: &lines_a,
-            lines_b: &lines_b,
-            options,
-            diff: &diff,
-            matches: &matches,
-            processed_diff: String::new(),
-            line_numbers: String::new(),
-            coloring: Vec::new(),
+        for i in 0..a_bufs.len() {
+            let diff = if options.consider_whitespace {
+                libdiff::diff(&lines_a[i], &lines_b[i])
+            } else {
+                libdiff::diff(&trimmed_lines_a[i], &trimmed_lines_b[i])
+            };
+
+            diff_sequences.push(diff);
         }
-        .process();
 
-        Ok(DiffView {
-            processed_diff,
-            line_numbers,
-            coloring,
-        })
+        let (diff_sequences, matches) = if options.track_moves {
+            let matched_diffs = if options.consider_whitespace {
+                libdiff::match_insertions_removals(diff_sequences, &lines_a, &lines_b)
+            } else {
+                libdiff::match_insertions_removals(
+                    diff_sequences,
+                    &trimmed_lines_a,
+                    &trimmed_lines_b,
+                )
+            };
+            (matched_diffs.diffs, matched_diffs.matches)
+        } else {
+            (diff_sequences, [].into())
+        };
+
+        let mut diffs = Vec::new();
+
+        for i in 0..a_bufs.len() {
+            let a = a_bufs[i].as_ref().map_or([].as_ref(), |x| x.as_ref());
+            let b = b_bufs[i].as_ref().map_or([].as_ref(), |x| x.as_ref());
+            let diff = &diff_sequences[i];
+            let label = &labels[i];
+
+            let lines_a = spiff::buf_to_lines(a).context("Failed to split file A by line")?;
+            let lines_b = spiff::buf_to_lines(b).context("Failed to split file B by line")?;
+            let (processed_diff, line_numbers, coloring) = DiffProcessor {
+                lines_a: &lines_a,
+                lines_b: &lines_b,
+                options,
+                diff,
+                diff_idx: i,
+                matches: &matches,
+                processed_diff: String::new(),
+                line_numbers: String::new(),
+                coloring: Vec::new(),
+            }
+            .process();
+
+            diffs.push(DiffViewFileData {
+                label: label.to_string(),
+                processed_diff,
+                line_numbers,
+                coloring,
+            });
+        }
+
+        Ok(DiffView { diffs })
     }
 
     fn show(&self, ui: &mut Ui) {
         const FONT_SIZE: f32 = 14.0;
 
-        let mut layouter = |ui: &Ui, s: &str, _wrap_width: f32| {
-            // FIXME: memoize
-
-            let mut job = LayoutJob::default();
-            for (range, color) in &self.coloring {
-                job.append(
-                    &s[range.clone()],
-                    0.0,
-                    TextFormat {
-                        color: *color,
-                        font_id: FontId::monospace(FONT_SIZE),
-                        ..Default::default()
-                    },
-                );
-            }
-
-            ui.fonts().layout_job(job)
-        };
-
         ScrollArea::both()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.add(Label::new(
-                        RichText::new(&self.line_numbers)
-                            .monospace()
-                            .size(FONT_SIZE)
-                            .color(ui.visuals().weak_text_color()),
-                    ));
+                for (idx, diff) in self.diffs.iter().enumerate() {
+                    let mut layouter = |ui: &Ui, s: &str, _wrap_width: f32| {
+                        // FIXME: memoize
 
-                    // HACK: Abusing the code editor to get free features like multi-line selection
-                    // and copy paste (which IIRC is the best way to get what I want)
-                    TextEdit::multiline(&mut self.processed_diff.as_str())
-                        .code_editor()
-                        .desired_width(f32::INFINITY)
-                        .layouter(&mut layouter)
-                        .show(ui);
-                });
+                        let mut job = LayoutJob::default();
+                        for (range, color) in &diff.coloring {
+                            job.append(
+                                &s[range.clone()],
+                                0.0,
+                                TextFormat {
+                                    color: *color,
+                                    font_id: FontId::monospace(FONT_SIZE),
+                                    ..Default::default()
+                                },
+                            );
+                        }
+
+                        ui.fonts().layout_job(job)
+                    };
+
+                    let mut header = CollapsingHeader::new(&diff.label);
+                    if idx == 0 {
+                        header = header.default_open(true);
+                    }
+
+                    header.show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.add(Label::new(
+                                RichText::new(&diff.line_numbers)
+                                    .monospace()
+                                    .size(FONT_SIZE)
+                                    .color(ui.visuals().weak_text_color()),
+                            ));
+
+                            // HACK: Abusing the code editor to get free features like multi-line selection
+                            // and copy paste (which IIRC is the best way to get what I want)
+                            TextEdit::multiline(&mut diff.processed_diff.as_str())
+                                .code_editor()
+                                .desired_width(f32::INFINITY)
+                                .layouter(&mut layouter)
+                                .show(ui);
+                        });
+                    });
+                }
             });
     }
 }
@@ -217,7 +280,8 @@ struct DiffProcessor<'a> {
     lines_a: &'a [&'a str],
     lines_b: &'a [&'a str],
     diff: &'a [libdiff::DiffAction],
-    matches: &'a std::collections::HashMap<usize, usize>,
+    diff_idx: usize,
+    matches: &'a std::collections::HashMap<(usize, usize), (usize, usize)>,
     processed_diff: String,
     line_numbers: String,
     coloring: Vec<(std::ops::Range<usize>, Color32)>,
@@ -298,7 +362,7 @@ impl DiffProcessor<'_> {
     }
 
     fn process_insertion(&mut self, insertion: &libdiff::Insertion, idx: usize) {
-        let color = if self.matches.contains_key(&idx) {
+        let color = if self.matches.contains_key(&(self.diff_idx, idx)) {
             Color32::LIGHT_BLUE
         } else {
             Color32::LIGHT_GREEN
@@ -322,7 +386,7 @@ impl DiffProcessor<'_> {
     fn process_removal(&mut self, removal: &libdiff::Removal, idx: usize) {
         let start_length = self.processed_diff.len();
 
-        let color = if self.matches.contains_key(&idx) {
+        let color = if self.matches.contains_key(&(self.diff_idx, idx)) {
             Color32::KHAKI
         } else {
             Color32::LIGHT_RED
@@ -358,4 +422,117 @@ impl DiffProcessor<'_> {
 
         writeln!(self.line_numbers, "{}|{}", line_a, line_b).expect("Failed to write line numbers");
     }
+}
+
+fn get_all_files<P: AsRef<Path>>(root: P, path: P) -> Result<Vec<PathBuf>> {
+    let path = path.as_ref();
+    let root = root.as_ref();
+
+    if !path.exists() {
+        return Err(anyhow!("Path {} does not exist", path.display()));
+    }
+
+    if !path.is_dir() {
+        return Ok(vec![path
+            .strip_prefix(root)
+            .with_context(|| format!("Failed to strip {} from {}", root.display(), path.display()))?
+            .to_path_buf()]);
+    }
+
+    let mut paths = Vec::new();
+    for entry in
+        fs::read_dir(path).with_context(|| format!("Failed to read dir {}", path.display()))?
+    {
+        let entry = entry.with_context(|| format!("Failed to read entry in {}", path.display()))?;
+        let visited_path = entry.path();
+        paths.extend(get_all_files(root, &visited_path)?);
+    }
+    Ok(paths)
+}
+
+struct Contents {
+    content_a: Vec<Option<Mmap>>,
+    content_b: Vec<Option<Mmap>>,
+    labels: Vec<String>,
+}
+
+fn contents_from_roots<P: AsRef<Path>>(root_a: P, root_b: P) -> Result<Contents> {
+    let root_a = root_a.as_ref();
+    let root_b = root_b.as_ref();
+
+    let paths_1 = get_all_files(&root_a, &root_a).context("Failed to get paths from a")?;
+    let paths_2 = get_all_files(&root_b, &root_b).context("Failed to get paths from b")?;
+
+    let (content_a, content_b, labels) = if !root_a.is_dir() && !root_b.is_dir() {
+        let a = spiff::open_file(root_a)
+            .with_context(|| format!("Failed to open {}", root_a.display()))?;
+        let b = spiff::open_file(root_b)
+            .with_context(|| format!("Failed to open {}", root_b.display()))?;
+
+        let label = format!("{} -> {}", root_a.display(), root_b.display());
+
+        (vec![Some(a)], vec![Some(b)], vec![label])
+    } else if paths_1.len() == 1 && paths_2.len() == 1 {
+        let full_path_a = root_a.join(&paths_1[0]);
+        let full_path_b = root_b.join(&paths_2[0]);
+        let a = spiff::open_file(&full_path_a)
+            .with_context(|| format!("Failed to open {}", full_path_a.display()))?;
+        let b = spiff::open_file(&full_path_b)
+            .with_context(|| format!("Failed to open {}", full_path_b.display()))?;
+
+        let label = format!("{} -> {}", root_a.display(), root_b.display());
+
+        (vec![Some(a)], vec![Some(b)], vec![label])
+    } else {
+        // BTreeSet gives us free dedup and sorting
+        let mut all_paths = paths_1.into_iter().collect::<BTreeSet<_>>();
+        all_paths.extend(paths_2.into_iter());
+        let paths = all_paths.into_iter().collect::<Vec<_>>();
+
+        let (content_a, content_b): (Vec<_>, Vec<_>) = paths
+            .iter()
+            .map(|p| {
+                let a = spiff::open_file(root_a.join(p)).map(Some).unwrap_or(None);
+                let b = spiff::open_file(root_b.join(p)).map(Some).unwrap_or(None);
+
+                (a, b)
+            })
+            .unzip();
+
+        let labels = paths
+            .into_iter()
+            .map(|p| p.to_string_lossy().to_string())
+            .collect();
+
+        (content_a, content_b, labels)
+    };
+
+    Ok(Contents {
+        content_a,
+        content_b,
+        labels,
+    })
+}
+
+fn unwrap_or_empty_buf<C>(option: &Option<C>) -> &[u8]
+where
+    C: AsRef<[u8]>,
+{
+    option.as_ref().map_or([].as_ref(), AsRef::as_ref)
+}
+
+fn bufs_to_lines<C>(bufs: &[Option<C>]) -> Result<Vec<Vec<&str>>>
+where
+    C: AsRef<[u8]>,
+{
+    bufs.iter()
+        .map(|x| spiff::buf_to_lines(unwrap_or_empty_buf(x)))
+        .collect::<Result<Vec<_>>>()
+}
+
+fn trim_lines<'a>(lines: &[Vec<&'a str>]) -> Vec<Vec<&'a str>> {
+    lines
+        .iter()
+        .map(|x| x.iter().map(|x| x.trim()).collect::<Vec<_>>())
+        .collect::<Vec<_>>()
 }
