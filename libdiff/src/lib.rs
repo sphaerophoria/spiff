@@ -3,6 +3,8 @@ use std::{
     collections::{BinaryHeap, HashMap, HashSet},
 };
 
+use rayon::prelude::*;
+
 /// An insertion into a
 #[derive(Eq, PartialEq, Debug, Clone, Ord, PartialOrd, Hash)]
 pub struct Insertion {
@@ -309,12 +311,25 @@ fn replace_element_with_sequence<U: Eq + PartialEq>(elem: &U, seq: Vec<U>, vec: 
     vec.splice(position..position + 1, seq);
 }
 
-#[derive(Eq, PartialEq, PartialOrd, Ord, Debug)]
+#[derive(Eq, PartialEq, Debug)]
 struct MatchCandidate {
-    // Order of elements important for ordering
     score: usize,
     insertion: (usize, Insertion),
     removal: (usize, Removal),
+}
+
+impl PartialOrd for MatchCandidate {
+    fn partial_cmp(&self, rhs: &Self) -> Option<std::cmp::Ordering> {
+        // Ignore insertion and removal in ordering. We only need to sort by the score
+        self.score.partial_cmp(&rhs.score)
+    }
+}
+
+impl Ord for MatchCandidate {
+    fn cmp(&self, rhs: &Self) -> std::cmp::Ordering {
+        // Ignore insertion and removal in ordering. We only need to sort by the score
+        self.score.cmp(&rhs.score)
+    }
 }
 
 /// Calculate scores between all insertions and removals
@@ -328,12 +343,21 @@ fn calculate_match_scores<U, C>(
 ) -> BinaryHeap<MatchCandidate>
 where
     U: PartialEq + Eq,
-    C: AsRef<[U]>,
+    C: AsRef<[U]> + Sync,
 {
-    let mut match_candidates = BinaryHeap::new();
+    let mut combinations = Vec::with_capacity(insertions.len() * removals.len());
+    for insertion_idx in 0..insertions.len() {
+        for removal_idx in 0..removals.len() {
+            combinations.push((insertion_idx, removal_idx));
+        }
+    }
 
-    for insertion in insertions {
-        for removal in removals {
+    combinations
+        .into_par_iter()
+        .filter_map(|(insertion_idx, removal_idx)| {
+            let insertion = &insertions[insertion_idx];
+            let removal = &removals[removal_idx];
+
             let score = calculate_match_score(
                 &insertion.1,
                 &removal.1,
@@ -342,16 +366,16 @@ where
             );
 
             if score > 0 {
-                match_candidates.push(MatchCandidate {
+                Some(MatchCandidate {
                     insertion: insertion.clone(),
                     removal: removal.clone(),
                     score,
-                });
+                })
+            } else {
+                None
             }
-        }
-    }
-
-    match_candidates
+        })
+        .collect()
 }
 
 pub struct MatchedDiffs {
@@ -373,7 +397,7 @@ pub fn match_insertions_removals<'a, U, C>(
 ) -> MatchedDiffs
 where
     U: Eq + PartialEq + 'a,
-    C: AsRef<[U]>,
+    C: AsRef<[U]> + Sync,
 {
     let (mut insertions, mut removals) = insertions_removals_from_actions(&d);
 
@@ -433,24 +457,8 @@ where
             );
 
             // Re-compute scores of new removals with all insertions
-            for removal in split_removals {
-                for insertion in &insertions {
-                    let score = calculate_match_score(
-                        &insertion.1,
-                        &removal.1,
-                        a[removal.0].as_ref(),
-                        b[insertion.0].as_ref(),
-                    );
-
-                    if score > 0 {
-                        match_candidates.push(MatchCandidate {
-                            insertion: insertion.clone(),
-                            removal: removal.clone(),
-                            score,
-                        });
-                    }
-                }
-            }
+            let new_candidates = calculate_match_scores(&insertions, &split_removals, a, b);
+            match_candidates.extend(new_candidates);
 
             // Remove dangling candidates
             ignored_removals.insert(match_candidate.removal);
@@ -474,24 +482,8 @@ where
             );
 
             // Re-compute scores of new insertions with all insertions
-            for insertion in split_insertions {
-                for removal in &removals {
-                    let score = calculate_match_score(
-                        &insertion.1,
-                        &removal.1,
-                        a[removal.0].as_ref(),
-                        b[insertion.0].as_ref(),
-                    );
-
-                    if score > 0 {
-                        match_candidates.push(MatchCandidate {
-                            insertion: insertion.clone(),
-                            removal: removal.clone(),
-                            score,
-                        });
-                    }
-                }
-            }
+            let new_candidates = calculate_match_scores(&split_insertions, &removals, a, b);
+            match_candidates.extend(new_candidates);
 
             // Remove dangling candidates
             ignored_insertions.insert(match_candidate.insertion);
