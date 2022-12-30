@@ -316,7 +316,7 @@ impl DiffProcessor<'_> {
             use DiffAction::*;
             match action {
                 Traverse(traversal) => {
-                    self.process_traversal(traversal);
+                    self.process_traversal(traversal, idx != 0, idx != self.diff.len() - 1);
                 }
                 Insert(insertion) => {
                     self.process_insertion(insertion, idx);
@@ -330,14 +330,19 @@ impl DiffProcessor<'_> {
         (self.processed_diff, self.line_numbers, self.coloring)
     }
 
-    fn process_traversal(&mut self, traversal: &libdiff::Traversal) {
+    fn process_traversal(
+        &mut self,
+        traversal: &libdiff::Traversal,
+        show_start: bool,
+        show_end: bool,
+    ) {
         let visuals = Visuals::default();
 
         let b_idx_offset = traversal.b_idx as i64 - traversal.a_idx as i64;
         let start_length = self.processed_diff.len();
 
         if traversal.length > self.options.context_lines * 2 {
-            if !self.processed_diff.is_empty() {
+            if show_start {
                 for (idx, line) in self
                     .lines_a
                     .iter()
@@ -356,15 +361,20 @@ impl DiffProcessor<'_> {
             writeln!(self.processed_diff, " ...").expect("Failed to write line");
             self.process_line_numbers(None, None);
 
-            for (idx, line) in self
-                .lines_a
-                .iter()
-                .enumerate()
-                .skip(traversal.a_idx + traversal.length - self.options.context_lines)
-                .take(self.options.context_lines)
-            {
-                self.process_line_numbers(Some(idx), Some((idx as i64 + b_idx_offset) as usize));
-                writeln!(self.processed_diff, " {}", line).expect("Failed to write line");
+            if show_end {
+                for (idx, line) in self
+                    .lines_a
+                    .iter()
+                    .enumerate()
+                    .skip(traversal.a_idx + traversal.length - self.options.context_lines)
+                    .take(self.options.context_lines)
+                {
+                    self.process_line_numbers(
+                        Some(idx),
+                        Some((idx as i64 + b_idx_offset) as usize),
+                    );
+                    writeln!(self.processed_diff, " {}", line).expect("Failed to write line");
+                }
             }
         } else {
             for (idx, line) in self
