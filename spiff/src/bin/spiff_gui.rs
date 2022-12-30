@@ -1,8 +1,8 @@
 use anyhow::{anyhow, Context, Result};
 use eframe::{
     egui::{
-        self, text::LayoutJob, CollapsingHeader, Color32, Context as EContext, Label, RichText,
-        ScrollArea, Slider, TextEdit, TextFormat, Ui, Visuals,
+        self, text::LayoutJob, Align, CollapsingHeader, Color32, Context as EContext, Label,
+        Layout, RichText, ScrollArea, Slider, TextEdit, TextFormat, Ui, Visuals,
     },
     epaint::FontId,
 };
@@ -14,6 +14,9 @@ use std::{
     fmt::Write as FmtWrite,
     fs,
     path::{Path, PathBuf},
+    sync::mpsc::{self, Receiver, Sender},
+    thread,
+    time::{Duration, Instant},
 };
 
 fn main() -> Result<()> {
@@ -26,16 +29,90 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+enum ThreadRequest {
+    ProcessDiff { options: DiffOptions },
+}
+
+enum ThreadResponse {
+    DiffProcessed {
+        options: DiffOptions,
+        time: Duration,
+        diffs: Result<Vec<DiffViewFileData>>,
+    },
+}
+
+fn processor_thread<P: AsRef<Path>>(
+    ctx: EContext,
+    root_a: P,
+    root_b: P,
+    rx: Receiver<ThreadRequest>,
+    tx: Sender<ThreadResponse>,
+) {
+    let root_a = root_a.as_ref();
+    let root_b = root_b.as_ref();
+
+    let Contents {
+        content_a,
+        content_b,
+        labels,
+    } = contents_from_roots(root_a, root_b).unwrap();
+
+    while let Ok(mut request) = rx.recv() {
+        while let Ok(latest_request) = rx.try_recv() {
+            request = latest_request;
+        }
+
+        match request {
+            ThreadRequest::ProcessDiff { options } => {
+                let start = Instant::now();
+                let diffs = process_diffs(&content_a, &content_b, &labels, &options);
+                let end = Instant::now();
+                tx.send(ThreadResponse::DiffProcessed {
+                    diffs,
+                    time: end - start,
+                    options,
+                })
+                .unwrap();
+
+                ctx.request_repaint();
+            }
+        }
+    }
+}
+
+enum DiffStatus {
+    Processing,
+    Success { num_diffs: usize, time: Duration },
+    Failure,
+}
+
+impl DiffStatus {
+    fn show(&self, ui: &mut Ui) {
+        let layout = Layout::right_to_left(Align::Center);
+        ui.with_layout(layout, |ui| {
+            let text = match self {
+                DiffStatus::Processing => "Processing...".to_string(),
+                DiffStatus::Success { num_diffs, time } => {
+                    format!("Processed {} diffs in {}s", num_diffs, time.as_secs_f32())
+                }
+                DiffStatus::Failure => "Failed to process diff".to_string(),
+            };
+
+            ui.label(text);
+        });
+    }
+}
+
 struct Spiff {
-    content_a: Vec<Option<Mmap>>,
-    content_b: Vec<Option<Mmap>>,
-    labels: Vec<String>,
     options: DiffOptions,
+    status: DiffStatus,
     diff_view: Result<DiffView>,
+    thread_tx: Sender<ThreadRequest>,
+    thread_rx: Receiver<ThreadResponse>,
 }
 
 impl Spiff {
-    fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+    fn new(cc: &eframe::CreationContext<'_>) -> Self {
         // Customize egui here with cc.egui_ctx.set_fonts and cc.egui_ctx.set_visuals.
         // Restore app state using cc.storage (requires the "persistence" feature).
         // Use the cc.gl (a glow::Context) to create graphics shaders and buffers that you can use
@@ -43,36 +120,86 @@ impl Spiff {
         let root_a = Path::new(&std::env::args().nth(1).unwrap()).to_path_buf();
         let root_b = Path::new(&std::env::args().nth(2).unwrap()).to_path_buf();
 
-        let Contents {
-            content_a,
-            content_b,
-            labels,
-        } = contents_from_roots(root_a, root_b).unwrap();
+        let (request_tx, request_rx) = mpsc::channel();
+        let (response_tx, response_rx) = mpsc::channel();
+
+        let ctx = cc.egui_ctx.clone();
+        thread::spawn(move || processor_thread(ctx, root_a, root_b, request_rx, response_tx));
 
         let options = DiffOptions::default();
-        let diff_view = DiffView::new(&content_a, &content_b, &labels, &options);
+        request_tx
+            .send(ThreadRequest::ProcessDiff {
+                options: options.clone(),
+            })
+            .unwrap();
+
+        let (diffs, time) = match response_rx.recv() {
+            Ok(ThreadResponse::DiffProcessed {
+                options: _,
+                time,
+                diffs,
+            }) => (diffs, time),
+            _ => panic!(),
+        };
+
+        let status = diffs
+            .as_ref()
+            .map(|x| DiffStatus::Success {
+                time,
+                num_diffs: x.len(),
+            })
+            .unwrap_or(DiffStatus::Failure);
+
+        let diff_view = diffs.map(|x| DiffView::new(x));
 
         Spiff {
-            content_a,
-            content_b,
-            labels,
-            options,
+            status,
             diff_view,
+            options,
+            thread_tx: request_tx,
+            thread_rx: response_rx,
         }
     }
 }
 
 impl eframe::App for Spiff {
     fn update(&mut self, ctx: &EContext, _frame: &mut eframe::Frame) {
+        let mut response = None;
+        while let Ok(last_response) = self.thread_rx.try_recv() {
+            response = Some(last_response);
+        }
+
+        if let Some(ThreadResponse::DiffProcessed {
+            diffs,
+            time,
+            options,
+        }) = response
+        {
+            if options == self.options {
+                self.status = diffs
+                    .as_ref()
+                    .map(|x| DiffStatus::Success {
+                        time,
+                        num_diffs: x.len(),
+                    })
+                    .unwrap_or(DiffStatus::Failure);
+            } else {
+                self.status = DiffStatus::Processing;
+            }
+
+            self.diff_view = diffs.map(|x| DiffView::new(x));
+        }
+
         egui::CentralPanel::default().show(ctx, |ui| {
             let new_options = self.options.show(ui);
             if new_options {
-                self.diff_view = DiffView::new(
-                    &self.content_a,
-                    &self.content_b,
-                    &self.labels,
-                    &self.options,
-                );
+                self.thread_tx
+                    .send(ThreadRequest::ProcessDiff {
+                        options: self.options.clone(),
+                    })
+                    .unwrap();
+
+                self.status = DiffStatus::Processing;
             }
 
             match self.diff_view.as_mut() {
@@ -86,16 +213,20 @@ impl eframe::App for Spiff {
                 }
             }
         });
+        egui::TopBottomPanel::bottom("Status").show(ctx, |ui| {
+            self.status.show(ui);
+        });
     }
 }
 
-#[derive(Eq, PartialEq)]
+#[derive(Eq, PartialEq, Clone)]
 enum ViewMode {
     AOnly,
     BOnly,
     Unified,
 }
 
+#[derive(Clone, Eq, PartialEq)]
 struct DiffOptions {
     context_lines: usize,
     track_moves: bool,
@@ -119,9 +250,12 @@ impl Default for DiffOptions {
 impl DiffOptions {
     fn show(&mut self, ui: &mut Ui) -> bool {
         ui.horizontal(|ui| {
-            let mut changed = ui
-                .add(Slider::new(&mut self.context_lines, 0..=100).text("Context lines"))
-                .changed();
+            let slider_response =
+                ui.add(Slider::new(&mut self.context_lines, 0..=100).text("Context lines"));
+
+            // Do not flag as changed until text is confirmed or drag is released. Prevents double
+            // processing on expensive re-renders
+            let mut changed = slider_response.drag_released() || slider_response.lost_focus();
 
             changed |= ui
                 .checkbox(&mut self.consider_whitespace, "Whitespace")
@@ -161,87 +295,8 @@ struct DiffView {
 }
 
 impl DiffView {
-    // Nasty generics to allow Mmap -> &[u8] coercion
-    fn new<C>(
-        a_bufs: &[Option<C>],
-        b_bufs: &[Option<C>],
-        labels: &[String],
-        options: &DiffOptions,
-    ) -> Result<DiffView>
-    where
-        C: AsRef<[u8]>,
-    {
-        assert_eq!(a_bufs.len(), labels.len());
-        assert_eq!(a_bufs.len(), b_bufs.len());
-
-        let mut diff_sequences = Vec::new();
-        let lines_a = bufs_to_lines(a_bufs)?;
-        let lines_b = bufs_to_lines(b_bufs)?;
-
-        let trimmed_lines_a = trim_lines(&lines_a);
-        let trimmed_lines_b = trim_lines(&lines_b);
-
-        for i in 0..a_bufs.len() {
-            let begin = std::time::Instant::now();
-            let diff = if options.consider_whitespace {
-                libdiff::diff(&lines_a[i], &lines_b[i])
-            } else {
-                libdiff::diff(&trimmed_lines_a[i], &trimmed_lines_b[i])
-            };
-            let duration = (std::time::Instant::now() - begin).as_millis();
-            if duration > 300 {
-                println!("Diffing {} took {}", labels[i], duration);
-            }
-            diff_sequences.push(diff);
-        }
-
-        let (diff_sequences, matches) = if options.track_moves {
-            let matched_diffs = if options.consider_whitespace {
-                libdiff::match_insertions_removals(diff_sequences, &lines_a, &lines_b)
-            } else {
-                libdiff::match_insertions_removals(
-                    diff_sequences,
-                    &trimmed_lines_a,
-                    &trimmed_lines_b,
-                )
-            };
-            (matched_diffs.diffs, matched_diffs.matches)
-        } else {
-            (diff_sequences, [].into())
-        };
-
-        let mut diffs = Vec::new();
-
-        for i in 0..a_bufs.len() {
-            let a = a_bufs[i].as_ref().map_or([].as_ref(), |x| x.as_ref());
-            let b = b_bufs[i].as_ref().map_or([].as_ref(), |x| x.as_ref());
-            let diff = &diff_sequences[i];
-            let label = &labels[i];
-
-            let lines_a = spiff::buf_to_lines(a).context("Failed to split file A by line")?;
-            let lines_b = spiff::buf_to_lines(b).context("Failed to split file B by line")?;
-            let (processed_diff, line_numbers, coloring) = DiffProcessor {
-                lines_a: &lines_a,
-                lines_b: &lines_b,
-                options,
-                diff,
-                diff_idx: i,
-                matches: &matches,
-                processed_diff: String::new(),
-                line_numbers: String::new(),
-                coloring: Vec::new(),
-            }
-            .process();
-
-            diffs.push(DiffViewFileData {
-                label: label.to_string(),
-                processed_diff,
-                line_numbers,
-                coloring,
-            });
-        }
-
-        Ok(DiffView { diffs })
+    fn new(diffs: Vec<DiffViewFileData>) -> DiffView {
+        DiffView { diffs }
     }
 
     fn show(&self, ui: &mut Ui) {
@@ -576,4 +631,83 @@ fn trim_lines<'a>(lines: &[Vec<&'a str>]) -> Vec<Vec<&'a str>> {
         .iter()
         .map(|x| x.iter().map(|x| x.trim()).collect::<Vec<_>>())
         .collect::<Vec<_>>()
+}
+
+// Nasty generics to allow Mmap -> &[u8] coercion
+fn process_diffs<C>(
+    a_bufs: &[Option<C>],
+    b_bufs: &[Option<C>],
+    labels: &[String],
+    options: &DiffOptions,
+) -> Result<Vec<DiffViewFileData>>
+where
+    C: AsRef<[u8]>,
+{
+    assert_eq!(a_bufs.len(), labels.len());
+    assert_eq!(a_bufs.len(), b_bufs.len());
+
+    let mut diff_sequences = Vec::new();
+    let lines_a = bufs_to_lines(a_bufs)?;
+    let lines_b = bufs_to_lines(b_bufs)?;
+
+    let trimmed_lines_a = trim_lines(&lines_a);
+    let trimmed_lines_b = trim_lines(&lines_b);
+
+    for i in 0..a_bufs.len() {
+        let begin = std::time::Instant::now();
+        let diff = if options.consider_whitespace {
+            libdiff::diff(&lines_a[i], &lines_b[i])
+        } else {
+            libdiff::diff(&trimmed_lines_a[i], &trimmed_lines_b[i])
+        };
+        let duration = (std::time::Instant::now() - begin).as_millis();
+        if duration > 300 {
+            println!("Diffing {} took {}", labels[i], duration);
+        }
+        diff_sequences.push(diff);
+    }
+
+    let (diff_sequences, matches) = if options.track_moves {
+        let matched_diffs = if options.consider_whitespace {
+            libdiff::match_insertions_removals(diff_sequences, &lines_a, &lines_b)
+        } else {
+            libdiff::match_insertions_removals(diff_sequences, &trimmed_lines_a, &trimmed_lines_b)
+        };
+        (matched_diffs.diffs, matched_diffs.matches)
+    } else {
+        (diff_sequences, [].into())
+    };
+
+    let mut diffs = Vec::new();
+
+    for i in 0..a_bufs.len() {
+        let a = a_bufs[i].as_ref().map_or([].as_ref(), |x| x.as_ref());
+        let b = b_bufs[i].as_ref().map_or([].as_ref(), |x| x.as_ref());
+        let diff = &diff_sequences[i];
+        let label = &labels[i];
+
+        let lines_a = spiff::buf_to_lines(a).context("Failed to split file A by line")?;
+        let lines_b = spiff::buf_to_lines(b).context("Failed to split file B by line")?;
+        let (processed_diff, line_numbers, coloring) = DiffProcessor {
+            lines_a: &lines_a,
+            lines_b: &lines_b,
+            options,
+            diff,
+            diff_idx: i,
+            matches: &matches,
+            processed_diff: String::new(),
+            line_numbers: String::new(),
+            coloring: Vec::new(),
+        }
+        .process();
+
+        diffs.push(DiffViewFileData {
+            label: label.to_string(),
+            processed_diff,
+            line_numbers,
+            coloring,
+        });
+    }
+
+    Ok(diffs)
 }
