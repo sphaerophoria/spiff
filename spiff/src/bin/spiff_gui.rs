@@ -10,7 +10,7 @@ use libdiff::DiffAction;
 use memmap2::Mmap;
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeSet, HashMap},
     fmt::Write as FmtWrite,
     fs,
     path::{Path, PathBuf},
@@ -57,6 +57,8 @@ fn processor_thread<P: AsRef<Path>>(
         labels,
     } = contents_from_roots(root_a, root_b).unwrap();
 
+    let mut request_processor = DiffRequestProcessor::new(&content_a, &content_b, &labels).unwrap();
+
     while let Ok(mut request) = rx.recv() {
         while let Ok(latest_request) = rx.try_recv() {
             request = latest_request;
@@ -65,10 +67,10 @@ fn processor_thread<P: AsRef<Path>>(
         match request {
             ThreadRequest::ProcessDiff { options } => {
                 let start = Instant::now();
-                let diffs = process_diffs(&content_a, &content_b, &labels, &options);
+                let diffs = request_processor.process_new_options(&options);
                 let end = Instant::now();
                 tx.send(ThreadResponse::DiffProcessed {
-                    diffs,
+                    diffs: Ok(diffs),
                     time: end - start,
                     options,
                 })
@@ -150,7 +152,7 @@ impl Spiff {
             })
             .unwrap_or(DiffStatus::Failure);
 
-        let diff_view = diffs.map(|x| DiffView::new(x));
+        let diff_view = diffs.map(DiffView::new);
 
         Spiff {
             status,
@@ -187,7 +189,7 @@ impl eframe::App for Spiff {
                 self.status = DiffStatus::Processing;
             }
 
-            self.diff_view = diffs.map(|x| DiffView::new(x));
+            self.diff_view = diffs.map(DiffView::new);
         }
 
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -250,12 +252,9 @@ impl Default for DiffOptions {
 impl DiffOptions {
     fn show(&mut self, ui: &mut Ui) -> bool {
         ui.horizontal(|ui| {
-            let slider_response =
-                ui.add(Slider::new(&mut self.context_lines, 0..=100).text("Context lines"));
-
-            // Do not flag as changed until text is confirmed or drag is released. Prevents double
-            // processing on expensive re-renders
-            let mut changed = slider_response.drag_released() || slider_response.lost_focus();
+            let mut changed = ui
+                .add(Slider::new(&mut self.context_lines, 0..=100).text("Context lines"))
+                .changed();
 
             changed |= ui
                 .checkbox(&mut self.consider_whitespace, "Whitespace")
@@ -353,10 +352,127 @@ impl DiffView {
     }
 }
 
+struct DiffRequestProcessor<'a> {
+    options: Option<DiffOptions>,
+    labels: &'a [String],
+    lines_a: Vec<Vec<&'a str>>,
+    lines_b: Vec<Vec<&'a str>>,
+    trimmed_lines_a: Vec<Vec<&'a str>>,
+    trimmed_lines_b: Vec<Vec<&'a str>>,
+    diffs: Vec<Vec<DiffAction>>,
+    matches: HashMap<(usize, usize), (usize, usize)>,
+}
+
+impl<'a> DiffRequestProcessor<'a> {
+    fn new<C>(
+        content_a: &'a [Option<C>],
+        content_b: &'a [Option<C>],
+        labels: &'a [String],
+    ) -> Result<DiffRequestProcessor<'a>>
+    where
+        C: AsRef<[u8]> + 'a,
+    {
+        let lines_a = bufs_to_lines(content_a)?;
+        let lines_b = bufs_to_lines(content_b)?;
+
+        let trimmed_lines_a = trim_lines(&lines_a);
+        let trimmed_lines_b = trim_lines(&lines_b);
+
+        Ok(DiffRequestProcessor {
+            options: None,
+            labels,
+            lines_a,
+            lines_b,
+            trimmed_lines_a,
+            trimmed_lines_b,
+            diffs: Vec::new(),
+            matches: HashMap::new(),
+        })
+    }
+
+    fn recompute_diffs(&mut self, options: &DiffOptions) {
+        self.diffs.clear();
+
+        for i in 0..self.lines_a.len() {
+            let begin = std::time::Instant::now();
+            let diff = if options.consider_whitespace {
+                libdiff::diff(&self.lines_a[i], &self.lines_b[i])
+            } else {
+                libdiff::diff(&self.trimmed_lines_a[i], &self.trimmed_lines_b[i])
+            };
+            let duration = (std::time::Instant::now() - begin).as_millis();
+            if duration > 300 {
+                println!("Diffing {} took {}", self.labels[i], duration);
+            }
+            self.diffs.push(diff);
+        }
+
+        (self.diffs, self.matches) = if options.track_moves {
+            let mut diffs = Vec::new();
+            std::mem::swap(&mut diffs, &mut self.diffs);
+
+            let matched_diffs = if options.consider_whitespace {
+                libdiff::match_insertions_removals(diffs, &self.lines_a, &self.lines_b)
+            } else {
+                libdiff::match_insertions_removals(
+                    diffs,
+                    &self.trimmed_lines_a,
+                    &self.trimmed_lines_b,
+                )
+            };
+            (matched_diffs.diffs, matched_diffs.matches)
+        } else {
+            let mut diffs = Vec::new();
+            std::mem::swap(&mut diffs, &mut self.diffs);
+            (diffs, [].into())
+        };
+    }
+
+    fn process_new_options(&mut self, options: &DiffOptions) -> Vec<DiffViewFileData> {
+        if self.options.is_none() {
+            self.recompute_diffs(options);
+            self.options = Some(options.clone());
+        }
+
+        let current_options = self.options.as_ref().unwrap();
+
+        if options.consider_whitespace != current_options.consider_whitespace
+            || options.track_moves != current_options.track_moves
+        {
+            self.recompute_diffs(options);
+            self.options = Some(options.clone());
+        }
+
+        let mut diffs = Vec::new();
+
+        for i in 0..self.lines_a.len() {
+            let data = DiffProcessor {
+                lines_a: &self.lines_a[i],
+                lines_b: &self.lines_b[i],
+                label: &self.labels[i],
+                options,
+                diff: &self.diffs[i],
+                diff_idx: i,
+                matches: &self.matches,
+                processed_diff: String::new(),
+                line_numbers: String::new(),
+                coloring: Vec::new(),
+            }
+            .process();
+
+            diffs.push(data);
+        }
+
+        diffs
+    }
+}
+
+/// Takes diff/matches/files/options and generates a DiffViewFileData for a single file pair
 struct DiffProcessor<'a> {
     options: &'a DiffOptions,
     lines_a: &'a [&'a str],
     lines_b: &'a [&'a str],
+    label: &'a str,
     diff: &'a [libdiff::DiffAction],
     diff_idx: usize,
     matches: &'a std::collections::HashMap<(usize, usize), (usize, usize)>,
@@ -366,7 +482,7 @@ struct DiffProcessor<'a> {
 }
 
 impl DiffProcessor<'_> {
-    fn process(mut self) -> (String, String, Vec<(std::ops::Range<usize>, Color32)>) {
+    fn process(mut self) -> DiffViewFileData {
         for (idx, action) in self.diff.iter().enumerate() {
             use DiffAction::*;
             match action {
@@ -382,7 +498,12 @@ impl DiffProcessor<'_> {
             }
         }
 
-        (self.processed_diff, self.line_numbers, self.coloring)
+        DiffViewFileData {
+            processed_diff: self.processed_diff,
+            line_numbers: self.line_numbers,
+            label: self.label.to_string(),
+            coloring: self.coloring,
+        }
     }
 
     fn process_traversal(
@@ -631,83 +752,4 @@ fn trim_lines<'a>(lines: &[Vec<&'a str>]) -> Vec<Vec<&'a str>> {
         .iter()
         .map(|x| x.iter().map(|x| x.trim()).collect::<Vec<_>>())
         .collect::<Vec<_>>()
-}
-
-// Nasty generics to allow Mmap -> &[u8] coercion
-fn process_diffs<C>(
-    a_bufs: &[Option<C>],
-    b_bufs: &[Option<C>],
-    labels: &[String],
-    options: &DiffOptions,
-) -> Result<Vec<DiffViewFileData>>
-where
-    C: AsRef<[u8]>,
-{
-    assert_eq!(a_bufs.len(), labels.len());
-    assert_eq!(a_bufs.len(), b_bufs.len());
-
-    let mut diff_sequences = Vec::new();
-    let lines_a = bufs_to_lines(a_bufs)?;
-    let lines_b = bufs_to_lines(b_bufs)?;
-
-    let trimmed_lines_a = trim_lines(&lines_a);
-    let trimmed_lines_b = trim_lines(&lines_b);
-
-    for i in 0..a_bufs.len() {
-        let begin = std::time::Instant::now();
-        let diff = if options.consider_whitespace {
-            libdiff::diff(&lines_a[i], &lines_b[i])
-        } else {
-            libdiff::diff(&trimmed_lines_a[i], &trimmed_lines_b[i])
-        };
-        let duration = (std::time::Instant::now() - begin).as_millis();
-        if duration > 300 {
-            println!("Diffing {} took {}", labels[i], duration);
-        }
-        diff_sequences.push(diff);
-    }
-
-    let (diff_sequences, matches) = if options.track_moves {
-        let matched_diffs = if options.consider_whitespace {
-            libdiff::match_insertions_removals(diff_sequences, &lines_a, &lines_b)
-        } else {
-            libdiff::match_insertions_removals(diff_sequences, &trimmed_lines_a, &trimmed_lines_b)
-        };
-        (matched_diffs.diffs, matched_diffs.matches)
-    } else {
-        (diff_sequences, [].into())
-    };
-
-    let mut diffs = Vec::new();
-
-    for i in 0..a_bufs.len() {
-        let a = a_bufs[i].as_ref().map_or([].as_ref(), |x| x.as_ref());
-        let b = b_bufs[i].as_ref().map_or([].as_ref(), |x| x.as_ref());
-        let diff = &diff_sequences[i];
-        let label = &labels[i];
-
-        let lines_a = spiff::buf_to_lines(a).context("Failed to split file A by line")?;
-        let lines_b = spiff::buf_to_lines(b).context("Failed to split file B by line")?;
-        let (processed_diff, line_numbers, coloring) = DiffProcessor {
-            lines_a: &lines_a,
-            lines_b: &lines_b,
-            options,
-            diff,
-            diff_idx: i,
-            matches: &matches,
-            processed_diff: String::new(),
-            line_numbers: String::new(),
-            coloring: Vec::new(),
-        }
-        .process();
-
-        diffs.push(DiffViewFileData {
-            label: label.to_string(),
-            processed_diff,
-            line_numbers,
-            coloring,
-        });
-    }
-
-    Ok(diffs)
 }
