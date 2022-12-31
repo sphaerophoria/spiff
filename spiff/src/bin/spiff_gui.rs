@@ -135,28 +135,9 @@ impl Spiff {
             })
             .unwrap();
 
-        let (diffs, time) = match response_rx.recv() {
-            Ok(ThreadResponse::DiffProcessed {
-                options: _,
-                time,
-                diffs,
-            }) => (diffs, time),
-            _ => panic!(),
-        };
-
-        let status = diffs
-            .as_ref()
-            .map(|x| DiffStatus::Success {
-                time,
-                num_diffs: x.len(),
-            })
-            .unwrap_or(DiffStatus::Failure);
-
-        let diff_view = diffs.map(DiffView::new);
-
         Spiff {
-            status,
-            diff_view,
+            status: DiffStatus::Processing,
+            diff_view: Err(anyhow!("Waiting for initial evaluation")),
             options,
             thread_tx: request_tx,
             thread_rx: response_rx,
