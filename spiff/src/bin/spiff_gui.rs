@@ -20,11 +20,14 @@ use std::{
 };
 
 fn main() -> Result<()> {
+    let root_a = Path::new(&std::env::args().nth(1).context("Path 1 not provided")?).to_path_buf();
+    let root_b = Path::new(&std::env::args().nth(2).context("Path 2 not provided")?).to_path_buf();
+
     let native_options = eframe::NativeOptions::default();
     eframe::run_native(
         "Spiff",
         native_options,
-        Box::new(|cc| Box::new(Spiff::new(cc))),
+        Box::new(|cc| Box::new(Spiff::new(cc, root_a, root_b))),
     );
     Ok(())
 }
@@ -37,7 +40,7 @@ enum ThreadResponse {
     DiffProcessed {
         options: DiffOptions,
         time: Duration,
-        diffs: Result<Vec<DiffViewFileData>>,
+        diffs: Vec<DiffViewFileData>,
     },
 }
 
@@ -46,18 +49,43 @@ fn processor_thread<P: AsRef<Path>>(
     root_a: P,
     root_b: P,
     rx: Receiver<ThreadRequest>,
-    tx: Sender<ThreadResponse>,
+    tx: Sender<Result<ThreadResponse>>,
 ) {
     let root_a = root_a.as_ref();
     let root_b = root_b.as_ref();
+
+    let fail_forever = |error: anyhow::Error| {
+        while let Ok(request) = rx.recv() {
+            match request {
+                ThreadRequest::ProcessDiff { .. } => {
+                    // Stringize the error here so that we can send it over and over
+                    if tx.send(Err(anyhow!("{:?}", error))).is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    };
 
     let Contents {
         content_a,
         content_b,
         labels,
-    } = contents_from_roots(root_a, root_b).unwrap();
+    } = match contents_from_roots(root_a, root_b) {
+        Ok(v) => v,
+        Err(e) => {
+            fail_forever(e);
+            return;
+        }
+    };
 
-    let mut request_processor = DiffRequestProcessor::new(&content_a, &content_b, &labels).unwrap();
+    let mut request_processor = match DiffRequestProcessor::new(&content_a, &content_b, &labels) {
+        Ok(v) => v,
+        Err(e) => {
+            fail_forever(e);
+            return;
+        }
+    };
 
     while let Ok(mut request) = rx.recv() {
         while let Ok(latest_request) = rx.try_recv() {
@@ -69,12 +97,16 @@ fn processor_thread<P: AsRef<Path>>(
                 let start = Instant::now();
                 let diffs = request_processor.process_new_options(&options);
                 let end = Instant::now();
-                tx.send(ThreadResponse::DiffProcessed {
-                    diffs: Ok(diffs),
-                    time: end - start,
-                    options,
-                })
-                .unwrap();
+                if tx
+                    .send(Ok(ThreadResponse::DiffProcessed {
+                        diffs,
+                        time: end - start,
+                        options,
+                    }))
+                    .is_err()
+                {
+                    break;
+                }
 
                 ctx.request_repaint();
             }
@@ -110,17 +142,15 @@ struct Spiff {
     status: DiffStatus,
     diff_view: Result<DiffView>,
     thread_tx: Sender<ThreadRequest>,
-    thread_rx: Receiver<ThreadResponse>,
+    thread_rx: Receiver<Result<ThreadResponse>>,
 }
 
 impl Spiff {
-    fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    fn new(cc: &eframe::CreationContext<'_>, root_a: PathBuf, root_b: PathBuf) -> Self {
         // Customize egui here with cc.egui_ctx.set_fonts and cc.egui_ctx.set_visuals.
         // Restore app state using cc.storage (requires the "persistence" feature).
         // Use the cc.gl (a glow::Context) to create graphics shaders and buffers that you can use
         // for e.g. egui::PaintCallback.
-        let root_a = Path::new(&std::env::args().nth(1).unwrap()).to_path_buf();
-        let root_b = Path::new(&std::env::args().nth(2).unwrap()).to_path_buf();
 
         let (request_tx, request_rx) = mpsc::channel();
         let (response_tx, response_rx) = mpsc::channel();
@@ -152,25 +182,26 @@ impl eframe::App for Spiff {
             response = Some(last_response);
         }
 
-        if let Some(ThreadResponse::DiffProcessed {
-            diffs,
-            time,
-            options,
-        }) = response
-        {
-            if options == self.options {
-                self.status = diffs
-                    .as_ref()
-                    .map(|x| DiffStatus::Success {
-                        time,
-                        num_diffs: x.len(),
-                    })
-                    .unwrap_or(DiffStatus::Failure);
-            } else {
-                self.status = DiffStatus::Processing;
+        if let Some(response) = response {
+            match response {
+                Ok(ThreadResponse::DiffProcessed {
+                    options,
+                    time,
+                    diffs,
+                }) => {
+                    if options == self.options {
+                        self.status = DiffStatus::Success {
+                            time,
+                            num_diffs: diffs.len(),
+                        };
+                    }
+                    self.diff_view = Ok(DiffView::new(diffs));
+                }
+                Err(e) => {
+                    self.status = DiffStatus::Failure;
+                    self.diff_view = Err(e);
+                }
             }
-
-            self.diff_view = diffs.map(DiffView::new);
         }
 
         egui::CentralPanel::default().show(ctx, |ui| {
