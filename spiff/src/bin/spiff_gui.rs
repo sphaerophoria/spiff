@@ -1,8 +1,8 @@
 use anyhow::{anyhow, Context, Result};
 use eframe::{
     egui::{
-        self, text::LayoutJob, Align, CollapsingHeader, Color32, Context as EContext, Label,
-        Layout, RichText, ScrollArea, Slider, TextEdit, TextFormat, Ui, Visuals,
+        self, text::LayoutJob, Align, CollapsingHeader, Color32, ComboBox, Context as EContext,
+        DragValue, Label, Layout, RichText, ScrollArea, TextEdit, TextFormat, Ui, Visuals,
     },
     epaint::FontId,
 };
@@ -11,7 +11,7 @@ use memmap2::Mmap;
 
 use std::{
     collections::{BTreeSet, HashMap},
-    fmt::Write as FmtWrite,
+    fmt::{self, Write as FmtWrite},
     fs,
     path::{Path, PathBuf},
     sync::mpsc::{self, Receiver, Sender},
@@ -233,11 +233,25 @@ impl eframe::App for Spiff {
     }
 }
 
-#[derive(Eq, PartialEq, Clone)]
+#[derive(Copy, Eq, PartialEq, Clone)]
 enum ViewMode {
     AOnly,
     BOnly,
     Unified,
+}
+
+impl fmt::Display for ViewMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        use ViewMode::*;
+
+        let s = match self {
+            AOnly => "A Only",
+            BOnly => "B Only",
+            Unified => "Unified",
+        };
+
+        f.write_str(s)
+    }
 }
 
 #[derive(Clone, Eq, PartialEq)]
@@ -264,9 +278,9 @@ impl Default for DiffOptions {
 impl DiffOptions {
     fn show(&mut self, ui: &mut Ui) -> bool {
         ui.horizontal(|ui| {
-            let mut changed = ui
-                .add(Slider::new(&mut self.context_lines, 0..=100).text("Context lines"))
-                .changed();
+            let mut changed = ui.add(DragValue::new(&mut self.context_lines)).changed();
+
+            ui.label("Context lines");
 
             changed |= ui
                 .checkbox(&mut self.consider_whitespace, "Whitespace")
@@ -278,15 +292,18 @@ impl DiffOptions {
                 .checkbox(&mut self.line_numbers, "Line Numbers")
                 .changed();
 
-            changed |= ui
-                .radio_value(&mut self.view_mode, ViewMode::AOnly, "A Only")
-                .changed();
-            changed |= ui
-                .radio_value(&mut self.view_mode, ViewMode::BOnly, "B Only")
-                .changed();
-            changed |= ui
-                .radio_value(&mut self.view_mode, ViewMode::Unified, "Unified")
-                .changed();
+            ComboBox::from_label("Diff mode")
+                .selected_text(self.view_mode.to_string())
+                .show_ui(ui, |ui| {
+                    let mut add_value = |v| {
+                        changed |= ui
+                            .selectable_value(&mut self.view_mode, v, v.to_string())
+                            .changed();
+                    };
+                    add_value(ViewMode::AOnly);
+                    add_value(ViewMode::BOnly);
+                    add_value(ViewMode::Unified);
+                });
 
             changed
         })
