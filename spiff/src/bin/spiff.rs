@@ -1,6 +1,5 @@
 use anyhow::{Context, Result};
-
-use libdiff::MatchedDiffs;
+use spiff::{DiffOptions, DiffCollectionProcessor, SegmentPurpose};
 
 fn main() -> Result<()> {
     let path1 = std::env::args()
@@ -10,60 +9,53 @@ fn main() -> Result<()> {
         .nth(2)
         .context("Path for file 2 not provided")?;
 
-    let file1 = spiff::open_file(path1).unwrap();
-    let file2 = spiff::open_file(path2).unwrap();
+    let spiff::Contents {
+        content_a,
+        content_b,
+        labels,
+    } = spiff::contents_from_roots(path1, path2)?;
 
-    let lines1 = spiff::buf_to_lines(&file1).unwrap();
-    let lines2 = spiff::buf_to_lines(&file2).unwrap();
+    let mut request_processor = DiffCollectionProcessor::new(&content_a, &content_b, &labels)?;
 
-    let diff = libdiff::diff(&lines1, &lines2);
-    let MatchedDiffs { mut diffs, matches } =
-        libdiff::match_insertions_removals([diff].to_vec(), &[&lines1], &[&lines2]);
-    let diff = diffs.pop().unwrap();
-    let matches = matches
-        .into_iter()
-        .map(|((idx, x), (idx2, y))| {
-            assert_eq!(idx, 0);
-            assert_eq!(idx, idx2);
-            (x, y)
-        })
-        .collect::<std::collections::HashMap<usize, usize>>();
-    for (action_idx, action) in diff.into_iter().enumerate() {
-        match action {
-            libdiff::DiffAction::Traverse(traversal) => {
-                for line in lines1.iter().skip(traversal.a_idx).take(traversal.length) {
-                    print!(" ");
-                    println!("{}", line);
+    let options = DiffOptions::default();
+    let diffs = request_processor.process_new_options(&options);
+
+    for diff in diffs {
+        println!("{}", diff.label);
+
+        // Track "columns" manually since we have no vertical layout
+        let mut line_number_lines = diff.line_numbers.lines();
+
+        for (range, purpose) in diff.coloring {
+            let color = match purpose {
+                SegmentPurpose::Context => None,
+                SegmentPurpose::Addition => Some(ansi_term::Colour::Green),
+                SegmentPurpose::Removal => Some(ansi_term::Colour::Red),
+                SegmentPurpose::MoveFrom => Some(ansi_term::Colour::Yellow),
+                SegmentPurpose::MoveTo => Some(ansi_term::Colour::Blue),
+            };
+
+            let start_color = || {
+                if let Some(color) = color.as_ref() {
+                    print!("{}", color.prefix());
                 }
-            }
-            libdiff::DiffAction::Remove(removal) => {
-                let colour = if matches.contains_key(&action_idx) {
-                    ansi_term::Colour::Yellow
-                } else {
-                    ansi_term::Colour::Red
-                };
-                print!("{}", colour.prefix());
-                for line in lines1.iter().skip(removal.a_idx).take(removal.length) {
-                    print!("-");
-                    println!("{}", line);
-                }
-                print!("{}", colour.suffix());
-            }
-            libdiff::DiffAction::Insert(insertion) => {
-                let colour = if matches.contains_key(&action_idx) {
-                    ansi_term::Colour::Blue
-                } else {
-                    ansi_term::Colour::Green
-                };
-                print!("{}", colour.prefix());
+            };
 
-                for line in lines2.iter().skip(insertion.b_idx).take(insertion.length) {
-                    print!("+");
-                    println!("{}", line);
+            let end_color = || {
+                if let Some(color) = color.as_ref() {
+                    print!("{}", color.suffix());
                 }
+            };
 
-                print!("{}", colour.suffix());
+            for line in diff.processed_diff[range].lines() {
+                end_color();
+                print!("{} ", line_number_lines.next().unwrap());
+
+                start_color();
+                println!("{}", line);
             }
+
+            end_color();
         }
     }
 
