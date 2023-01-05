@@ -8,7 +8,7 @@ use eframe::{
 };
 
 use spiff::{
-    Contents, DiffCollectionProcessor, DiffOptions, DiffViewFileData, SegmentPurpose, ViewMode,
+    Contents, DiffCollectionProcessor, DiffOptions, ProcessedDiffData, SegmentPurpose, ViewMode,
 };
 
 use std::{
@@ -39,7 +39,7 @@ enum ThreadResponse {
     DiffProcessed {
         options: DiffOptions,
         time: Duration,
-        diffs: Vec<DiffViewFileData>,
+        diffs: Vec<ProcessedDiffData>,
     },
 }
 
@@ -298,11 +298,11 @@ fn purpose_to_format(purpose: &SegmentPurpose, visuals: &Visuals, font_size: f32
 }
 
 struct DiffView {
-    diffs: Vec<DiffViewFileData>,
+    diffs: Vec<ProcessedDiffData>,
 }
 
 impl DiffView {
-    fn new(diffs: Vec<DiffViewFileData>) -> DiffView {
+    fn new(diffs: Vec<ProcessedDiffData>) -> DiffView {
         DiffView { diffs }
     }
 

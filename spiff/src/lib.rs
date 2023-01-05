@@ -60,7 +60,7 @@ pub enum SegmentPurpose {
     MoveTo,
 }
 
-pub struct DiffViewFileData {
+pub struct ProcessedDiffData {
     pub label: String,
     pub processed_diff: String,
     pub line_numbers: String,
@@ -143,7 +143,7 @@ impl<'a> DiffCollectionProcessor<'a> {
         };
     }
 
-    pub fn process_new_options(&mut self, options: &DiffOptions) -> Vec<DiffViewFileData> {
+    pub fn process_new_options(&mut self, options: &DiffOptions) -> Vec<ProcessedDiffData> {
         if self.options.is_none() {
             self.recompute_diffs(options);
             self.options = Some(options.clone());
@@ -197,7 +197,7 @@ struct SingleDiffProcessor<'a> {
 }
 
 impl SingleDiffProcessor<'_> {
-    fn process(mut self) -> DiffViewFileData {
+    fn process(mut self) -> ProcessedDiffData {
         for (idx, action) in self.diff.iter().enumerate() {
             use DiffAction::*;
             match action {
@@ -213,7 +213,7 @@ impl SingleDiffProcessor<'_> {
             }
         }
 
-        DiffViewFileData {
+        ProcessedDiffData {
             processed_diff: self.processed_diff,
             line_numbers: self.line_numbers,
             label: self.label.to_string(),
