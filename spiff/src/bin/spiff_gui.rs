@@ -1,14 +1,17 @@
 use anyhow::{anyhow, Context, Result};
 use eframe::{
     egui::{
-        self, text::LayoutJob, Align, CollapsingHeader, Color32, ComboBox, Context as EContext,
-        DragValue, Label, Layout, RichText, ScrollArea, TextEdit, TextFormat, Ui, Visuals,
+        self,
+        text::{CCursor, LayoutJob},
+        Align, CollapsingHeader, Color32, ComboBox, Context as EContext, DragValue, Label, Layout,
+        RichText, ScrollArea, TextEdit, TextFormat, Ui, Visuals,
     },
     epaint::FontId,
 };
 
 use spiff::{
-    Contents, DiffCollectionProcessor, DiffOptions, ProcessedDiffData, SegmentPurpose, ViewMode,
+    Contents, DiffCollectionProcessor, DiffOptions, DisplayInfo, ProcessedDiffCollection,
+    ProcessedDiffData, ProcessedDiffIdx, SegmentPurpose, ViewMode,
 };
 
 use std::{
@@ -33,13 +36,15 @@ fn main() -> Result<()> {
 
 enum ThreadRequest {
     ProcessDiff { options: DiffOptions },
+    SetSearchQuery(String),
 }
 
 enum ThreadResponse {
     DiffProcessed {
+        reason: String,
         options: DiffOptions,
         time: Duration,
-        diffs: Vec<ProcessedDiffData>,
+        processed_diffs: ProcessedDiffCollection,
     },
 }
 
@@ -54,14 +59,10 @@ fn processor_thread<P: AsRef<Path>>(
     let root_b = root_b.as_ref();
 
     let fail_forever = |error: anyhow::Error| {
-        while let Ok(request) = rx.recv() {
-            match request {
-                ThreadRequest::ProcessDiff { .. } => {
-                    // Stringize the error here so that we can send it over and over
-                    if tx.send(Err(anyhow!("{:?}", error))).is_err() {
-                        break;
-                    }
-                }
+        while rx.recv().is_ok() {
+            // Stringize the error here so that we can send it over and over
+            if tx.send(Err(anyhow!("{:?}", error))).is_err() {
+                break;
             }
         }
     };
@@ -95,13 +96,35 @@ fn processor_thread<P: AsRef<Path>>(
         match request {
             ThreadRequest::ProcessDiff { options } => {
                 let start = Instant::now();
-                let diffs = request_processor.process_new_options(&options);
+                request_processor.process_new_options(&options);
+                let processed_diffs = request_processor.generate();
                 let end = Instant::now();
                 if tx
                     .send(Ok(ThreadResponse::DiffProcessed {
-                        diffs,
+                        reason: "options changed".to_string(),
+                        processed_diffs,
                         time: end - start,
                         options,
+                    }))
+                    .is_err()
+                {
+                    break;
+                }
+
+                ctx.request_repaint();
+            }
+            ThreadRequest::SetSearchQuery(query) => {
+                let start = Instant::now();
+                request_processor.set_search_query(query);
+                let processed_diffs = request_processor.generate();
+                let end = Instant::now();
+
+                if tx
+                    .send(Ok(ThreadResponse::DiffProcessed {
+                        reason: "search string changed".to_string(),
+                        processed_diffs,
+                        time: end - start,
+                        options: request_processor.options().clone(),
                     }))
                     .is_err()
                 {
@@ -116,7 +139,11 @@ fn processor_thread<P: AsRef<Path>>(
 
 enum DiffStatus {
     Processing,
-    Success { num_diffs: usize, time: Duration },
+    Success {
+        reason: String,
+        num_diffs: usize,
+        time: Duration,
+    },
     Failure,
 }
 
@@ -126,8 +153,17 @@ impl DiffStatus {
         ui.with_layout(layout, |ui| {
             let text = match self {
                 DiffStatus::Processing => "Processing...".to_string(),
-                DiffStatus::Success { num_diffs, time } => {
-                    format!("Processed {} diffs in {}s", num_diffs, time.as_secs_f32())
+                DiffStatus::Success {
+                    reason,
+                    num_diffs,
+                    time,
+                } => {
+                    format!(
+                        "Processed {} diffs from {} in {}s",
+                        num_diffs,
+                        reason,
+                        time.as_secs_f32()
+                    )
                 }
                 DiffStatus::Failure => "Failed to process diff".to_string(),
             };
@@ -185,17 +221,26 @@ impl eframe::App for Spiff {
         if let Some(response) = response {
             match response {
                 Ok(ThreadResponse::DiffProcessed {
+                    reason,
                     options,
                     time,
-                    diffs,
+                    processed_diffs,
                 }) => {
                     if options == self.options {
                         self.status = DiffStatus::Success {
+                            reason,
                             time,
-                            num_diffs: diffs.len(),
+                            num_diffs: processed_diffs.processed_diffs.len(),
                         };
                     }
-                    self.diff_view = Ok(DiffView::new(diffs));
+                    match &mut self.diff_view {
+                        Ok(v) => {
+                            v.update_data(processed_diffs);
+                        }
+                        Err(_) => {
+                            self.diff_view = Ok(DiffView::new(processed_diffs));
+                        }
+                    }
                 }
                 Err(e) => {
                     self.status = DiffStatus::Failure;
@@ -203,6 +248,10 @@ impl eframe::App for Spiff {
                 }
             }
         }
+
+        egui::TopBottomPanel::bottom("Status").show(ctx, |ui| {
+            self.status.show(ui);
+        });
 
         egui::CentralPanel::default().show(ctx, |ui| {
             let new_options = show_options(&mut self.options, ui);
@@ -218,7 +267,11 @@ impl eframe::App for Spiff {
 
             match self.diff_view.as_mut() {
                 Ok(diff_view) => {
-                    diff_view.show(ui);
+                    if let DiffViewAction::UpdateSearch(query) = diff_view.show(ui) {
+                        self.thread_tx
+                            .send(ThreadRequest::SetSearchQuery(query))
+                            .unwrap();
+                    }
                 }
                 Err(e) => {
                     ui.centered_and_justified(|ui| {
@@ -226,9 +279,6 @@ impl eframe::App for Spiff {
                     });
                 }
             }
-        });
-        egui::TopBottomPanel::bottom("Status").show(ctx, |ui| {
-            self.status.show(ui);
         });
     }
 }
@@ -269,14 +319,19 @@ fn show_options(options: &mut DiffOptions, ui: &mut Ui) -> bool {
     .inner
 }
 
-fn purpose_to_format(purpose: &SegmentPurpose, visuals: &Visuals, font_size: f32) -> TextFormat {
+fn info_to_format(
+    info: &DisplayInfo,
+    visuals: &Visuals,
+    font_size: f32,
+    select_color: Color32,
+) -> TextFormat {
     use SegmentPurpose::*;
     let mut format = TextFormat {
         font_id: FontId::monospace(font_size),
         ..Default::default()
     };
 
-    match purpose {
+    match info.purpose {
         Context => {
             format.color = visuals.text_color();
         }
@@ -294,64 +349,249 @@ fn purpose_to_format(purpose: &SegmentPurpose, visuals: &Visuals, font_size: f32
         }
     }
 
+    if info.matches_search {
+        format.background = select_color;
+    }
+
     format
 }
 
+enum SearchBarAction {
+    Jump,
+    UpdateSearch(String),
+    None,
+}
+
+struct SearchBar {
+    visible: bool,
+    search_query: String,
+    search_results: Vec<ProcessedDiffIdx>,
+    current_search_idx: usize,
+}
+
+impl Default for SearchBar {
+    fn default() -> Self {
+        SearchBar {
+            visible: false,
+            search_query: String::new(),
+            search_results: Vec::new(),
+            current_search_idx: usize::MAX,
+        }
+    }
+}
+
+impl SearchBar {
+    fn new() -> SearchBar {
+        Default::default()
+    }
+
+    fn update_data(&mut self, data: Vec<ProcessedDiffIdx>) {
+        self.search_results = data;
+        self.current_search_idx = 0;
+    }
+
+    fn increment_search_idx(&mut self) {
+        self.current_search_idx = self.current_search_idx.wrapping_add(1);
+        if self.current_search_idx >= self.search_results.len() {
+            self.current_search_idx = usize::MAX;
+        }
+    }
+
+    fn decrement_search_idx(&mut self) {
+        self.current_search_idx = self.current_search_idx.wrapping_sub(1);
+
+        if self.current_search_idx >= self.search_results.len() {
+            self.current_search_idx = self.search_results.len() - 1;
+        }
+    }
+
+    fn set_visible(&mut self, visible: bool) {
+        self.visible = visible;
+    }
+
+    fn diff_idx(&self) -> usize {
+        if self.current_search_idx < self.search_results.len() {
+            self.search_results[self.current_search_idx].diff_idx
+        } else {
+            usize::MAX
+        }
+    }
+
+    fn string_idx(&self) -> usize {
+        if self.current_search_idx < self.search_results.len() {
+            self.search_results[self.current_search_idx].string_idx
+        } else {
+            usize::MAX
+        }
+    }
+
+    fn show(&mut self, search_bar_request_input: bool, ui: &mut Ui) -> SearchBarAction {
+        if !self.visible {
+            return SearchBarAction::None;
+        }
+
+        let mut action = SearchBarAction::None;
+
+        let search_response = ui.text_edit_singleline(&mut self.search_query);
+
+        if search_response.lost_focus() && ui.input().key_pressed(egui::Key::Enter) {
+            search_response.request_focus();
+            if ui.input().modifiers.shift {
+                self.decrement_search_idx();
+            } else {
+                self.increment_search_idx();
+            }
+            action = SearchBarAction::Jump;
+        }
+
+        if search_response.changed() {
+            action = SearchBarAction::UpdateSearch(self.search_query.clone());
+        }
+
+        if search_bar_request_input {
+            search_response.request_focus();
+        }
+
+        if ui.input().key_down(egui::Key::Escape) {
+            self.visible = false;
+            self.search_query.clear();
+            action = SearchBarAction::UpdateSearch(self.search_query.clone());
+        }
+
+        action
+    }
+}
+
+enum DiffViewAction {
+    UpdateSearch(String),
+    None,
+}
+
 struct DiffView {
-    diffs: Vec<ProcessedDiffData>,
+    processed_diffs: Vec<ProcessedDiffData>,
+    search_bar: SearchBar,
 }
 
 impl DiffView {
-    fn new(diffs: Vec<ProcessedDiffData>) -> DiffView {
-        DiffView { diffs }
+    fn new(diffs: ProcessedDiffCollection) -> DiffView {
+        let mut view = DiffView {
+            processed_diffs: Vec::new(),
+            search_bar: SearchBar::new(),
+        };
+
+        view.update_data(diffs);
+
+        view
     }
 
-    fn show(&self, ui: &mut Ui) {
+    fn update_data(&mut self, diffs: ProcessedDiffCollection) {
+        self.processed_diffs = diffs.processed_diffs;
+        self.search_bar.update_data(diffs.search_results);
+    }
+
+    fn show(&mut self, ui: &mut Ui) -> DiffViewAction {
+        // ScrollArea will expand to fill all remaining space, layout bottom to top so that we can
+        // add a search bar at the bottom. Invert the layout again to get a normal layout for the
+        // Scroll area
+
+        let outer_layout = *ui.layout();
+        let mut action = DiffViewAction::None;
+        ui.with_layout(Layout::bottom_up(Align::LEFT), |ui| {
+            let mut jump_to_search = false;
+
+            let search_bar_request_input =
+                if ui.input().key_down(egui::Key::F) && ui.input().modifiers.ctrl {
+                    self.search_bar.set_visible(true);
+                    true
+                } else {
+                    false
+                };
+
+            match self.search_bar.show(search_bar_request_input, ui) {
+                SearchBarAction::Jump => {
+                    jump_to_search = true;
+                }
+                SearchBarAction::UpdateSearch(query) => {
+                    action = DiffViewAction::UpdateSearch(query);
+                }
+                SearchBarAction::None => (),
+            }
+
+            ui.with_layout(outer_layout, |ui| {
+                ScrollArea::both()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        for idx in 0..self.processed_diffs.len() {
+                            self.show_diff(idx, jump_to_search, ui);
+                        }
+                    });
+            });
+        });
+
+        action
+    }
+
+    fn show_diff(&mut self, diff_idx: usize, jump_to_search: bool, ui: &mut Ui) {
         const FONT_SIZE: f32 = 14.0;
 
-        ScrollArea::both()
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                for (idx, diff) in self.diffs.iter().enumerate() {
-                    let mut layouter = |ui: &Ui, s: &str, _wrap_width: f32| {
-                        // FIXME: memoize
+        let diff = &self.processed_diffs[diff_idx];
 
-                        let mut job = LayoutJob::default();
-                        for (range, purpose) in &diff.coloring {
-                            job.append(
-                                &s[range.clone()],
-                                0.0,
-                                purpose_to_format(purpose, ui.visuals(), FONT_SIZE),
-                            );
-                        }
+        let mut layouter = |ui: &Ui, s: &str, _wrap_width: f32| {
+            // FIXME: memoize
+            let mut job = LayoutJob::default();
+            for (range, info) in &diff.display_info {
+                let select_color = if self.search_bar.diff_idx() == diff_idx
+                    && self.search_bar.string_idx() == range.start
+                {
+                    Color32::from_rgb(0, 0xcb, 0xff)
+                } else {
+                    ui.visuals().selection.bg_fill
+                };
 
-                        ui.fonts().layout_job(job)
-                    };
+                job.append(
+                    &s[range.clone()],
+                    0.0,
+                    info_to_format(info, ui.visuals(), FONT_SIZE, select_color),
+                );
+            }
 
-                    let mut header = CollapsingHeader::new(&diff.label);
-                    if idx == 0 {
-                        header = header.default_open(true);
-                    }
+            ui.fonts().layout_job(job)
+        };
 
-                    header.show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.add(Label::new(
-                                RichText::new(&diff.line_numbers)
-                                    .monospace()
-                                    .size(FONT_SIZE)
-                                    .color(ui.visuals().weak_text_color()),
-                            ));
+        let mut header = CollapsingHeader::new(&diff.label);
 
-                            // HACK: Abusing the code editor to get free features like multi-line selection
-                            // and copy paste (which IIRC is the best way to get what I want)
-                            TextEdit::multiline(&mut diff.processed_diff.as_str())
-                                .code_editor()
-                                .desired_width(f32::INFINITY)
-                                .layouter(&mut layouter)
-                                .show(ui);
-                        });
-                    });
+        if jump_to_search && diff_idx == self.search_bar.diff_idx() {
+            header = header.open(Some(true));
+        }
+
+        header.show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.add(Label::new(
+                    RichText::new(&diff.line_numbers)
+                        .monospace()
+                        .size(FONT_SIZE)
+                        .color(ui.visuals().weak_text_color()),
+                ));
+
+                // HACK: Abusing the code editor to get free features like multi-line selection
+                // and copy paste (which IIRC is the best way to get what I want)
+                let response = TextEdit::multiline(&mut diff.processed_diff.as_str())
+                    .code_editor()
+                    .desired_width(f32::INFINITY)
+                    .layouter(&mut layouter)
+                    .show(ui);
+
+                if jump_to_search {
+                    let string_idx = self.search_bar.string_idx();
+
+                    let cursor = response.galley.from_ccursor(CCursor::new(string_idx));
+                    let mut pos = response.galley.pos_from_cursor(&cursor);
+                    pos.min.x += response.text_draw_pos.x;
+                    pos.min.y += response.text_draw_pos.y;
+                    pos.max = pos.min;
+                    ui.scroll_to_rect(pos, Some(Align::Center));
                 }
             });
+        });
     }
 }

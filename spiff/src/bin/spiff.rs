@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use spiff::{DiffOptions, DiffCollectionProcessor, SegmentPurpose};
+use spiff::{DiffCollectionProcessor, SegmentPurpose};
 
 fn main() -> Result<()> {
     let path1 = std::env::args()
@@ -15,19 +15,18 @@ fn main() -> Result<()> {
         labels,
     } = spiff::contents_from_roots(path1, path2)?;
 
-    let mut request_processor = DiffCollectionProcessor::new(&content_a, &content_b, &labels)?;
+    let request_processor = DiffCollectionProcessor::new(&content_a, &content_b, &labels)?;
 
-    let options = DiffOptions::default();
-    let diffs = request_processor.process_new_options(&options);
+    let processed_diff_collection = request_processor.generate();
 
-    for diff in diffs {
+    for diff in processed_diff_collection.processed_diffs {
         println!("{}", diff.label);
 
         // Track "columns" manually since we have no vertical layout
         let mut line_number_lines = diff.line_numbers.lines();
 
-        for (range, purpose) in diff.coloring {
-            let color = match purpose {
+        for (range, info) in diff.display_info {
+            let color = match info.purpose {
                 SegmentPurpose::Context => None,
                 SegmentPurpose::Addition => Some(ansi_term::Colour::Green),
                 SegmentPurpose::Removal => Some(ansi_term::Colour::Red),

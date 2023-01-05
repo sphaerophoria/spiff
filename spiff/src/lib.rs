@@ -9,6 +9,7 @@ use std::{
 };
 
 use libdiff::DiffAction;
+
 #[derive(Copy, Eq, PartialEq, Clone)]
 pub enum ViewMode {
     AOnly,
@@ -60,15 +61,31 @@ pub enum SegmentPurpose {
     MoveTo,
 }
 
+pub struct DisplayInfo {
+    pub purpose: SegmentPurpose,
+    pub matches_search: bool,
+}
+
+#[derive(Hash)]
+pub struct ProcessedDiffIdx {
+    pub diff_idx: usize,
+    pub string_idx: usize,
+}
+
+pub struct ProcessedDiffCollection {
+    pub processed_diffs: Vec<ProcessedDiffData>,
+    pub search_results: Vec<ProcessedDiffIdx>,
+}
+
 pub struct ProcessedDiffData {
     pub label: String,
     pub processed_diff: String,
     pub line_numbers: String,
-    pub coloring: Vec<(std::ops::Range<usize>, SegmentPurpose)>,
+    pub display_info: Vec<(std::ops::Range<usize>, DisplayInfo)>,
 }
 
 pub struct DiffCollectionProcessor<'a> {
-    options: Option<DiffOptions>,
+    options: DiffOptions,
     labels: &'a [String],
     lines_a: Vec<Vec<&'a str>>,
     lines_b: Vec<Vec<&'a str>>,
@@ -76,6 +93,7 @@ pub struct DiffCollectionProcessor<'a> {
     trimmed_lines_b: Vec<Vec<&'a str>>,
     diffs: Vec<Vec<DiffAction>>,
     matches: HashMap<(usize, usize), (usize, usize)>,
+    search_query: String,
 }
 
 impl<'a> DiffCollectionProcessor<'a> {
@@ -93,8 +111,8 @@ impl<'a> DiffCollectionProcessor<'a> {
         let trimmed_lines_a = trim_lines(&lines_a);
         let trimmed_lines_b = trim_lines(&lines_b);
 
-        Ok(DiffCollectionProcessor {
-            options: None,
+        let mut processor = DiffCollectionProcessor {
+            options: Default::default(),
             labels,
             lines_a,
             lines_b,
@@ -102,15 +120,24 @@ impl<'a> DiffCollectionProcessor<'a> {
             trimmed_lines_b,
             diffs: Vec::new(),
             matches: HashMap::new(),
-        })
+            search_query: String::new(),
+        };
+
+        processor.recompute_diffs();
+
+        Ok(processor)
     }
 
-    fn recompute_diffs(&mut self, options: &DiffOptions) {
+    pub fn options(&self) -> &DiffOptions {
+        &self.options
+    }
+
+    fn recompute_diffs(&mut self) {
         self.diffs.clear();
 
         for i in 0..self.lines_a.len() {
             let begin = std::time::Instant::now();
-            let diff = if options.consider_whitespace {
+            let diff = if self.options.consider_whitespace {
                 libdiff::diff(&self.lines_a[i], &self.lines_b[i])
             } else {
                 libdiff::diff(&self.trimmed_lines_a[i], &self.trimmed_lines_b[i])
@@ -122,11 +149,11 @@ impl<'a> DiffCollectionProcessor<'a> {
             self.diffs.push(diff);
         }
 
-        (self.diffs, self.matches) = if options.track_moves {
+        (self.diffs, self.matches) = if self.options.track_moves {
             let mut diffs = Vec::new();
             std::mem::swap(&mut diffs, &mut self.diffs);
 
-            let matched_diffs = if options.consider_whitespace {
+            let matched_diffs = if self.options.consider_whitespace {
                 libdiff::match_insertions_removals(diffs, &self.lines_a, &self.lines_b)
             } else {
                 libdiff::match_insertions_removals(
@@ -143,42 +170,51 @@ impl<'a> DiffCollectionProcessor<'a> {
         };
     }
 
-    pub fn process_new_options(&mut self, options: &DiffOptions) -> Vec<ProcessedDiffData> {
-        if self.options.is_none() {
-            self.recompute_diffs(options);
-            self.options = Some(options.clone());
+    pub fn process_new_options(&mut self, options: &DiffOptions) {
+        if self.options != *options {
+            self.options = options.clone();
+            self.recompute_diffs();
         }
+    }
 
-        let current_options = self.options.as_ref().unwrap();
+    pub fn set_search_query(&mut self, query: String) {
+        self.search_query = query;
+    }
 
-        if options.consider_whitespace != current_options.consider_whitespace
-            || options.track_moves != current_options.track_moves
-        {
-            self.recompute_diffs(options);
-            self.options = Some(options.clone());
-        }
-
+    pub fn generate(&self) -> ProcessedDiffCollection {
         let mut diffs = Vec::new();
+        let mut search_results = Vec::new();
 
         for i in 0..self.lines_a.len() {
-            let data = SingleDiffProcessor {
+            let (data, single_search_results) = SingleDiffProcessor {
                 lines_a: &self.lines_a[i],
                 lines_b: &self.lines_b[i],
                 label: &self.labels[i],
-                options,
+                options: &self.options,
                 diff: &self.diffs[i],
                 diff_idx: i,
                 matches: &self.matches,
+                search_query: &self.search_query,
+                search_results: Vec::new(),
                 processed_diff: String::new(),
                 line_numbers: String::new(),
-                coloring: Vec::new(),
+                display_info: Vec::new(),
             }
             .process();
 
             diffs.push(data);
+            search_results.extend(single_search_results.into_iter().map(|string_idx| {
+                ProcessedDiffIdx {
+                    diff_idx: i,
+                    string_idx,
+                }
+            }));
         }
 
-        diffs
+        ProcessedDiffCollection {
+            processed_diffs: diffs,
+            search_results,
+        }
     }
 }
 
@@ -191,13 +227,15 @@ struct SingleDiffProcessor<'a> {
     diff: &'a [libdiff::DiffAction],
     diff_idx: usize,
     matches: &'a std::collections::HashMap<(usize, usize), (usize, usize)>,
+    search_query: &'a str,
+    search_results: Vec<usize>,
     processed_diff: String,
     line_numbers: String,
-    coloring: Vec<(std::ops::Range<usize>, SegmentPurpose)>,
+    display_info: Vec<(std::ops::Range<usize>, DisplayInfo)>,
 }
 
 impl SingleDiffProcessor<'_> {
-    fn process(mut self) -> ProcessedDiffData {
+    fn process(mut self) -> (ProcessedDiffData, Vec<usize>) {
         for (idx, action) in self.diff.iter().enumerate() {
             use DiffAction::*;
             match action {
@@ -213,12 +251,14 @@ impl SingleDiffProcessor<'_> {
             }
         }
 
-        ProcessedDiffData {
+        let data = ProcessedDiffData {
             processed_diff: self.processed_diff,
             line_numbers: self.line_numbers,
             label: self.label.to_string(),
-            coloring: self.coloring,
-        }
+            display_info: self.display_info,
+        };
+
+        (data, self.search_results)
     }
 
     fn process_traversal(
@@ -277,9 +317,53 @@ impl SingleDiffProcessor<'_> {
                 writeln!(self.processed_diff, " {}", line).expect("Failed to write line");
             }
         }
-        self.coloring.push((
-            start_length..self.processed_diff.len(),
-            SegmentPurpose::Context,
+
+        self.push_coloring_with_search_highlights(start_length, SegmentPurpose::Context);
+    }
+
+    fn push_coloring_with_search_highlights(
+        &mut self,
+        start_length: usize,
+        purpose: SegmentPurpose,
+    ) {
+        let altered_string = &self.processed_diff[start_length..];
+
+        let mut pos = start_length;
+
+        if !self.search_query.is_empty() {
+            let match_indices = altered_string
+                .match_indices(self.search_query)
+                .map(|(idx, _)| idx + start_length)
+                .collect::<Vec<_>>();
+
+            for result_idx in match_indices {
+                self.search_results.push(result_idx);
+
+                self.display_info.push((
+                    pos..result_idx,
+                    DisplayInfo {
+                        purpose,
+                        matches_search: false,
+                    },
+                ));
+                self.display_info.push((
+                    result_idx..result_idx + self.search_query.len(),
+                    DisplayInfo {
+                        purpose,
+                        matches_search: true,
+                    },
+                ));
+
+                pos = result_idx + self.search_query.len();
+            }
+        }
+
+        self.display_info.push((
+            pos..self.processed_diff.len(),
+            DisplayInfo {
+                purpose,
+                matches_search: false,
+            },
         ));
     }
 
@@ -304,8 +388,7 @@ impl SingleDiffProcessor<'_> {
             self.process_line_numbers(None, Some(idx));
             let start_length = self.processed_diff.len();
             writeln!(self.processed_diff, "+{}", line).expect("Failed to write line");
-            self.coloring
-                .push((start_length..self.processed_diff.len(), purpose));
+            self.push_coloring_with_search_highlights(start_length, purpose);
         }
     }
 
@@ -333,8 +416,7 @@ impl SingleDiffProcessor<'_> {
             writeln!(self.processed_diff, "-{}", line).expect("Failed to write line");
         }
 
-        self.coloring
-            .push((start_length..self.processed_diff.len(), purpose));
+        self.push_coloring_with_search_highlights(start_length, purpose);
     }
 
     fn process_line_numbers(&mut self, line_a: Option<usize>, line_b: Option<usize>) {
