@@ -79,7 +79,7 @@ fn processor_thread<P: AsRef<Path>>(
         }
     };
 
-    let mut request_processor = match DiffRequestProcessor::new(&content_a, &content_b, &labels) {
+    let mut request_processor = match DiffCollectionProcessor::new(&content_a, &content_b, &labels) {
         Ok(v) => v,
         Err(e) => {
             fail_forever(e);
@@ -381,7 +381,7 @@ impl DiffView {
     }
 }
 
-struct DiffRequestProcessor<'a> {
+struct DiffCollectionProcessor<'a> {
     options: Option<DiffOptions>,
     labels: &'a [String],
     lines_a: Vec<Vec<&'a str>>,
@@ -392,12 +392,12 @@ struct DiffRequestProcessor<'a> {
     matches: HashMap<(usize, usize), (usize, usize)>,
 }
 
-impl<'a> DiffRequestProcessor<'a> {
+impl<'a> DiffCollectionProcessor<'a> {
     fn new<C>(
         content_a: &'a [Option<C>],
         content_b: &'a [Option<C>],
         labels: &'a [String],
-    ) -> Result<DiffRequestProcessor<'a>>
+    ) -> Result<DiffCollectionProcessor<'a>>
     where
         C: AsRef<[u8]> + 'a,
     {
@@ -407,7 +407,7 @@ impl<'a> DiffRequestProcessor<'a> {
         let trimmed_lines_a = trim_lines(&lines_a);
         let trimmed_lines_b = trim_lines(&lines_b);
 
-        Ok(DiffRequestProcessor {
+        Ok(DiffCollectionProcessor {
             options: None,
             labels,
             lines_a,
@@ -475,7 +475,7 @@ impl<'a> DiffRequestProcessor<'a> {
         let mut diffs = Vec::new();
 
         for i in 0..self.lines_a.len() {
-            let data = DiffProcessor {
+            let data = SingleDiffProcessor {
                 lines_a: &self.lines_a[i],
                 lines_b: &self.lines_b[i],
                 label: &self.labels[i],
@@ -497,7 +497,7 @@ impl<'a> DiffRequestProcessor<'a> {
 }
 
 /// Takes diff/matches/files/options and generates a DiffViewFileData for a single file pair
-struct DiffProcessor<'a> {
+struct SingleDiffProcessor<'a> {
     options: &'a DiffOptions,
     lines_a: &'a [&'a str],
     lines_b: &'a [&'a str],
@@ -510,7 +510,7 @@ struct DiffProcessor<'a> {
     coloring: Vec<(std::ops::Range<usize>, Color32)>,
 }
 
-impl DiffProcessor<'_> {
+impl SingleDiffProcessor<'_> {
     fn process(mut self) -> DiffViewFileData {
         for (idx, action) in self.diff.iter().enumerate() {
             use DiffAction::*;
