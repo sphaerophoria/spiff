@@ -311,11 +311,49 @@ impl DiffOptions {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum SegmentPurpose {
+    Context,
+    Addition,
+    Removal,
+    MoveFrom,
+    MoveTo,
+}
+
 struct DiffViewFileData {
     label: String,
     processed_diff: String,
     line_numbers: String,
-    coloring: Vec<(std::ops::Range<usize>, Color32)>,
+    coloring: Vec<(std::ops::Range<usize>, SegmentPurpose)>,
+}
+
+
+fn purpose_to_format(purpose: &SegmentPurpose, visuals: &Visuals, font_size: f32) -> TextFormat {
+    use SegmentPurpose::*;
+    let mut format = TextFormat {
+        font_id: FontId::monospace(font_size),
+        ..Default::default()
+    };
+
+    match purpose {
+        Context => {
+            format.color = visuals.text_color();
+        }
+        Addition => {
+            format.color = Color32::LIGHT_GREEN;
+        }
+        Removal => {
+            format.color = Color32::LIGHT_RED;
+        }
+        MoveFrom => {
+            format.color = Color32::KHAKI;
+        }
+        MoveTo => {
+            format.color = Color32::LIGHT_BLUE;
+        }
+    }
+
+    format
 }
 
 struct DiffView {
@@ -338,15 +376,11 @@ impl DiffView {
                         // FIXME: memoize
 
                         let mut job = LayoutJob::default();
-                        for (range, color) in &diff.coloring {
+                        for (range, purpose) in &diff.coloring {
                             job.append(
                                 &s[range.clone()],
                                 0.0,
-                                TextFormat {
-                                    color: *color,
-                                    font_id: FontId::monospace(FONT_SIZE),
-                                    ..Default::default()
-                                },
+                                purpose_to_format(purpose, ui.visuals(), FONT_SIZE)
                             );
                         }
 
@@ -507,7 +541,7 @@ struct SingleDiffProcessor<'a> {
     matches: &'a std::collections::HashMap<(usize, usize), (usize, usize)>,
     processed_diff: String,
     line_numbers: String,
-    coloring: Vec<(std::ops::Range<usize>, Color32)>,
+    coloring: Vec<(std::ops::Range<usize>, SegmentPurpose)>,
 }
 
 impl SingleDiffProcessor<'_> {
@@ -541,8 +575,6 @@ impl SingleDiffProcessor<'_> {
         show_start: bool,
         show_end: bool,
     ) {
-        let visuals = Visuals::default();
-
         let a_idx_offset = traversal.a_idx as i64 - traversal.b_idx as i64;
         let start_length = self.processed_diff.len();
 
@@ -595,7 +627,7 @@ impl SingleDiffProcessor<'_> {
         }
         self.coloring.push((
             start_length..self.processed_diff.len(),
-            visuals.text_color(),
+            SegmentPurpose::Context,
         ));
     }
 
@@ -604,10 +636,10 @@ impl SingleDiffProcessor<'_> {
             return;
         }
 
-        let color = if self.matches.contains_key(&(self.diff_idx, idx)) {
-            Color32::LIGHT_BLUE
+        let purpose = if self.matches.contains_key(&(self.diff_idx, idx)) {
+            SegmentPurpose::MoveTo
         } else {
-            Color32::LIGHT_GREEN
+            SegmentPurpose::Addition
         };
 
         for (idx, line) in self
@@ -621,7 +653,7 @@ impl SingleDiffProcessor<'_> {
             let start_length = self.processed_diff.len();
             writeln!(self.processed_diff, "+{}", line).expect("Failed to write line");
             self.coloring
-                .push((start_length..self.processed_diff.len(), color));
+                .push((start_length..self.processed_diff.len(), purpose));
         }
     }
 
@@ -632,10 +664,10 @@ impl SingleDiffProcessor<'_> {
 
         let start_length = self.processed_diff.len();
 
-        let color = if self.matches.contains_key(&(self.diff_idx, idx)) {
-            Color32::KHAKI
+        let purpose = if self.matches.contains_key(&(self.diff_idx, idx)) {
+            SegmentPurpose::MoveFrom
         } else {
-            Color32::LIGHT_RED
+            SegmentPurpose::Removal
         };
 
         for (a_idx, line) in self
@@ -650,7 +682,7 @@ impl SingleDiffProcessor<'_> {
         }
 
         self.coloring
-            .push((start_length..self.processed_diff.len(), color));
+            .push((start_length..self.processed_diff.len(), purpose));
     }
 
     fn process_line_numbers(&mut self, line_a: Option<usize>, line_b: Option<usize>) {
