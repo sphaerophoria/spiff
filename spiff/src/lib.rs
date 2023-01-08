@@ -10,6 +10,8 @@ use std::{
 
 use libdiff::DiffAction;
 
+pub mod widget;
+
 #[derive(Copy, Eq, PartialEq, Clone)]
 pub enum ViewMode {
     AOnly,
