@@ -30,8 +30,8 @@ fn main() -> Result<()> {
                 SegmentPurpose::Context => None,
                 SegmentPurpose::Addition => Some(ansi_term::Colour::Green),
                 SegmentPurpose::Removal => Some(ansi_term::Colour::Red),
-                SegmentPurpose::MoveFrom => Some(ansi_term::Colour::Yellow),
-                SegmentPurpose::MoveTo => Some(ansi_term::Colour::Blue),
+                SegmentPurpose::MoveFrom(_) => Some(ansi_term::Colour::Yellow),
+                SegmentPurpose::MoveTo(_) => Some(ansi_term::Colour::Blue),
             };
 
             let start_color = || {

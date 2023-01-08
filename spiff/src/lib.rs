@@ -52,13 +52,13 @@ impl Default for DiffOptions {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum SegmentPurpose {
     Context,
     Addition,
     Removal,
-    MoveFrom,
-    MoveTo,
+    MoveFrom(DiffLineIdx),
+    MoveTo(DiffLineIdx),
 }
 
 pub struct DisplayInfo {
@@ -66,7 +66,13 @@ pub struct DisplayInfo {
     pub matches_search: bool,
 }
 
-#[derive(Hash)]
+#[derive(Debug, Hash, Clone)]
+pub struct DiffLineIdx {
+    pub diff_idx: usize,
+    pub line_idx: usize,
+}
+
+#[derive(Debug, Hash, Clone)]
 pub struct ProcessedDiffIdx {
     pub diff_idx: usize,
     pub string_idx: usize,
@@ -191,7 +197,7 @@ impl<'a> DiffCollectionProcessor<'a> {
                 lines_b: &self.lines_b[i],
                 label: &self.labels[i],
                 options: &self.options,
-                diff: &self.diffs[i],
+                diffs: &self.diffs,
                 diff_idx: i,
                 matches: &self.matches,
                 search_query: &self.search_query,
@@ -224,7 +230,7 @@ struct SingleDiffProcessor<'a> {
     lines_a: &'a [&'a str],
     lines_b: &'a [&'a str],
     label: &'a str,
-    diff: &'a [libdiff::DiffAction],
+    diffs: &'a [Vec<libdiff::DiffAction>],
     diff_idx: usize,
     matches: &'a std::collections::HashMap<(usize, usize), (usize, usize)>,
     search_query: &'a str,
@@ -236,11 +242,15 @@ struct SingleDiffProcessor<'a> {
 
 impl SingleDiffProcessor<'_> {
     fn process(mut self) -> (ProcessedDiffData, Vec<usize>) {
-        for (idx, action) in self.diff.iter().enumerate() {
+        for (idx, action) in self.diffs[self.diff_idx].iter().enumerate() {
             use DiffAction::*;
             match action {
                 Traverse(traversal) => {
-                    self.process_traversal(traversal, idx != 0, idx != self.diff.len() - 1);
+                    self.process_traversal(
+                        traversal,
+                        idx != 0,
+                        idx != self.diffs[self.diff_idx].len() - 1,
+                    );
                 }
                 Insert(insertion) => {
                     self.process_insertion(insertion, idx);
@@ -342,14 +352,14 @@ impl SingleDiffProcessor<'_> {
                 self.display_info.push((
                     pos..result_idx,
                     DisplayInfo {
-                        purpose,
+                        purpose: purpose.clone(),
                         matches_search: false,
                     },
                 ));
                 self.display_info.push((
                     result_idx..result_idx + self.search_query.len(),
                     DisplayInfo {
-                        purpose,
+                        purpose: purpose.clone(),
                         matches_search: true,
                     },
                 ));
@@ -372,8 +382,15 @@ impl SingleDiffProcessor<'_> {
             return;
         }
 
-        let purpose = if self.matches.contains_key(&(self.diff_idx, idx)) {
-            SegmentPurpose::MoveTo
+        let purpose = if let Some((diff_idx, chunk_idx)) = self.matches.get(&(self.diff_idx, idx)) {
+            let line_idx = match &self.diffs[*diff_idx][*chunk_idx] {
+                DiffAction::Remove(removal) => removal.a_idx,
+                _ => panic!("Invalid match"),
+            };
+            SegmentPurpose::MoveTo(DiffLineIdx {
+                diff_idx: *diff_idx,
+                line_idx,
+            })
         } else {
             SegmentPurpose::Addition
         };
@@ -388,7 +405,7 @@ impl SingleDiffProcessor<'_> {
             self.process_line_numbers(None, Some(idx));
             let start_length = self.processed_diff.len();
             writeln!(self.processed_diff, "+{}", line).expect("Failed to write line");
-            self.push_coloring_with_search_highlights(start_length, purpose);
+            self.push_coloring_with_search_highlights(start_length, purpose.clone());
         }
     }
 
@@ -399,8 +416,15 @@ impl SingleDiffProcessor<'_> {
 
         let start_length = self.processed_diff.len();
 
-        let purpose = if self.matches.contains_key(&(self.diff_idx, idx)) {
-            SegmentPurpose::MoveFrom
+        let purpose = if let Some((diff_idx, chunk_idx)) = self.matches.get(&(self.diff_idx, idx)) {
+            let line_idx = match &self.diffs[*diff_idx][*chunk_idx] {
+                DiffAction::Insert(insertion) => insertion.b_idx,
+                _ => panic!("Invalid match"),
+            };
+            SegmentPurpose::MoveFrom(DiffLineIdx {
+                diff_idx: *diff_idx,
+                line_idx,
+            })
         } else {
             SegmentPurpose::Removal
         };

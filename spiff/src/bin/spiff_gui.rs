@@ -381,10 +381,10 @@ fn info_to_format(
         Removal => {
             format.color = Color32::LIGHT_RED;
         }
-        MoveFrom => {
+        MoveFrom(_) => {
             format.color = Color32::KHAKI;
         }
-        MoveTo => {
+        MoveTo(_) => {
             format.color = Color32::LIGHT_BLUE;
         }
     }
@@ -612,7 +612,7 @@ impl DiffView {
 
         header.show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.add(Label::new(
+                let label_response = ui.add(Label::new(
                     RichText::new(&diff.line_numbers)
                         .monospace()
                         .size(FONT_SIZE)
@@ -626,6 +626,43 @@ impl DiffView {
                     .desired_width(f32::INFINITY)
                     .layouter(&mut layouter)
                     .show(ui);
+
+                let rect_min = response.response.rect.min;
+                let galley = std::sync::Arc::clone(&response.galley);
+                let pointer_pos = ui.input().pointer.hover_pos();
+                if let Some(pointer_pos) = pointer_pos {
+                    let cursor_pos = galley
+                        .cursor_from_pos(egui::vec2(0.0, pointer_pos.y - rect_min.y))
+                        .ccursor
+                        .index;
+
+                    let mut hover_segment = None;
+                    for segment in &diff.display_info {
+                        if cursor_pos >= segment.0.start && cursor_pos < segment.0.end {
+                            hover_segment = Some(&segment.1.purpose)
+                        }
+                    }
+
+                    match hover_segment {
+                        Some(SegmentPurpose::MoveTo(loc)) => {
+                            label_response.on_hover_ui_at_pointer(|ui| {
+                                ui.label(format!(
+                                    "Moved from {}:{}",
+                                    self.processed_diffs[loc.diff_idx].label, loc.line_idx
+                                ));
+                            });
+                        }
+                        Some(SegmentPurpose::MoveFrom(loc)) => {
+                            label_response.on_hover_ui_at_pointer(|ui| {
+                                ui.label(format!(
+                                    "Moved to {}:{}",
+                                    self.processed_diffs[loc.diff_idx].label, loc.line_idx
+                                ));
+                            });
+                        }
+                        _ => (),
+                    }
+                }
 
                 if jump_to_search {
                     let string_idx = self.search_bar.string_idx();
