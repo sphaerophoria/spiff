@@ -90,6 +90,10 @@ pub struct ProcessedDiffData {
     pub processed_diff: String,
     pub line_numbers: String,
     pub display_info: Vec<(std::ops::Range<usize>, DisplayInfo)>,
+    pub num_inserted_lines: usize,
+    pub num_removed_lines: usize,
+    pub num_moved_insertions: usize,
+    pub num_moved_removals: usize,
 }
 
 pub struct DiffCollectionProcessor<'a> {
@@ -207,6 +211,10 @@ impl<'a> DiffCollectionProcessor<'a> {
                 processed_diff: String::new(),
                 line_numbers: String::new(),
                 display_info: Vec::new(),
+                num_inserted_lines: 0,
+                num_removed_lines: 0,
+                num_moved_insertions: 0,
+                num_moved_removals: 0,
             }
             .process();
 
@@ -240,6 +248,10 @@ struct SingleDiffProcessor<'a> {
     processed_diff: String,
     line_numbers: String,
     display_info: Vec<(std::ops::Range<usize>, DisplayInfo)>,
+    num_inserted_lines: usize,
+    num_removed_lines: usize,
+    num_moved_insertions: usize,
+    num_moved_removals: usize,
 }
 
 impl SingleDiffProcessor<'_> {
@@ -268,6 +280,10 @@ impl SingleDiffProcessor<'_> {
             line_numbers: self.line_numbers,
             label: self.label.to_string(),
             display_info: self.display_info,
+            num_removed_lines: self.num_removed_lines,
+            num_inserted_lines: self.num_inserted_lines,
+            num_moved_insertions: self.num_moved_insertions,
+            num_moved_removals: self.num_moved_removals,
         };
 
         (data, self.search_results)
@@ -389,6 +405,7 @@ impl SingleDiffProcessor<'_> {
                 DiffAction::Remove(removal) => removal.a_idx,
                 _ => panic!("Invalid match"),
             };
+            self.num_moved_insertions += insertion.length;
             SegmentPurpose::MoveTo(DiffLineIdx {
                 diff_idx: *diff_idx,
                 line_idx,
@@ -411,6 +428,7 @@ impl SingleDiffProcessor<'_> {
         }
 
         self.push_coloring_with_search_highlights(start_length, purpose);
+        self.num_inserted_lines += insertion.length;
     }
 
     fn process_removal(&mut self, removal: &libdiff::Removal, idx: usize) {
@@ -425,6 +443,7 @@ impl SingleDiffProcessor<'_> {
                 DiffAction::Insert(insertion) => insertion.b_idx,
                 _ => panic!("Invalid match"),
             };
+            self.num_moved_removals += removal.length;
             SegmentPurpose::MoveFrom(DiffLineIdx {
                 diff_idx: *diff_idx,
                 line_idx,
@@ -445,6 +464,8 @@ impl SingleDiffProcessor<'_> {
         }
 
         self.push_coloring_with_search_highlights(start_length, purpose);
+
+        self.num_removed_lines += removal.length;
     }
 
     fn process_line_numbers(&mut self, line_a: Option<usize>, line_b: Option<usize>) {

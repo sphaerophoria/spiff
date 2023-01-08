@@ -3,7 +3,7 @@ use eframe::{
         self,
         text::{CCursor, LayoutJob},
         Align, CollapsingHeader, Color32, ComboBox, DragValue, Label, Layout, RichText, ScrollArea,
-        TextEdit, TextFormat, Ui, Visuals,
+        TextEdit, TextFormat, TextStyle, Ui, Visuals,
     },
     epaint::FontId,
 };
@@ -194,7 +194,50 @@ impl DiffView {
             ui.fonts().layout_job(job)
         };
 
-        let mut header = CollapsingHeader::new(&diff.label).open(force_collapse_state);
+        let mut label_job = LayoutJob::default();
+        let label_fontid = TextStyle::Monospace.resolve(ui.style());
+        let mut label_append = |s: &str, color| {
+            label_job.append(s, 0.0, TextFormat::simple(label_fontid.clone(), color));
+        };
+
+        label_append(&diff.label, ui.visuals().text_color());
+        label_append("\n", ui.visuals().text_color());
+        label_append(
+            &format!("{} ", diff.num_inserted_lines + diff.num_removed_lines),
+            ui.visuals().text_color(),
+        );
+
+        label_append(
+            std::str::from_utf8(&vec![
+                b'+';
+                ((diff.num_inserted_lines - diff.num_moved_insertions)
+                    + 1)
+                    / 2
+            ])
+            .unwrap(),
+            Color32::LIGHT_GREEN,
+        );
+        label_append(
+            std::str::from_utf8(&vec![b'+'; diff.num_moved_insertions / 2]).unwrap(),
+            Color32::LIGHT_BLUE,
+        );
+
+        label_append(
+            std::str::from_utf8(&vec![
+                b'-';
+                (diff.num_removed_lines - diff.num_moved_removals + 1)
+                    / 2
+            ])
+            .unwrap(),
+            Color32::LIGHT_RED,
+        );
+
+        label_append(
+            std::str::from_utf8(&vec![b'-'; diff.num_moved_removals / 2]).unwrap(),
+            Color32::KHAKI,
+        );
+
+        let mut header = CollapsingHeader::new(label_job).open(force_collapse_state);
 
         if jump_to_search && diff_idx == self.search_bar.diff_idx() {
             header = header.open(Some(true));
