@@ -254,8 +254,8 @@ impl eframe::App for Spiff {
         });
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            let new_options = show_options(&mut self.options, ui);
-            if new_options {
+            let header_action = show_header(&mut self.options, ui);
+            if let HeaderAction::RequestProcess = &header_action {
                 self.thread_tx
                     .send(ThreadRequest::ProcessDiff {
                         options: self.options.clone(),
@@ -265,9 +265,17 @@ impl eframe::App for Spiff {
                 self.status = DiffStatus::Processing;
             }
 
+            let force_collapse_state = match header_action {
+                HeaderAction::ExpandAll => Some(true),
+                HeaderAction::CollapseAll => Some(false),
+                _ => None,
+            };
+
             match self.diff_view.as_mut() {
                 Ok(diff_view) => {
-                    if let DiffViewAction::UpdateSearch(query) = diff_view.show(ui) {
+                    if let DiffViewAction::UpdateSearch(query) =
+                        diff_view.show(ui, force_collapse_state)
+                    {
                         self.thread_tx
                             .send(ThreadRequest::SetSearchQuery(query))
                             .unwrap();
@@ -283,38 +291,70 @@ impl eframe::App for Spiff {
     }
 }
 
-fn show_options(options: &mut DiffOptions, ui: &mut Ui) -> bool {
+enum HeaderAction {
+    RequestProcess,
+    ExpandAll,
+    CollapseAll,
+    None,
+}
+
+fn show_header(options: &mut DiffOptions, ui: &mut Ui) -> HeaderAction {
     ui.horizontal(|ui| {
-        let mut changed = ui.add(DragValue::new(&mut options.context_lines)).changed();
+        let mut action = HeaderAction::None;
+
+        if ui.button("Expand All").clicked() {
+            action = HeaderAction::ExpandAll;
+        }
+
+        if ui.button("Collapse All").clicked() {
+            action = HeaderAction::CollapseAll;
+        }
+
+        if ui.add(DragValue::new(&mut options.context_lines)).changed() {
+            action = HeaderAction::RequestProcess;
+        }
 
         ui.label("Context lines");
 
-        changed |= ui
+        if ui
             .checkbox(&mut options.consider_whitespace, "Whitespace")
-            .changed();
+            .changed()
+        {
+            action = HeaderAction::RequestProcess;
+        }
 
-        changed |= ui
+        if ui
             .checkbox(&mut options.track_moves, "Track Moves")
-            .changed();
+            .changed()
+        {
+            action = HeaderAction::RequestProcess;
+        }
 
-        changed |= ui
+        if ui
             .checkbox(&mut options.line_numbers, "Line Numbers")
-            .changed();
+            .changed()
+        {
+            action = HeaderAction::RequestProcess;
+        }
 
         ComboBox::from_label("Diff mode")
             .selected_text(options.view_mode.to_string())
             .show_ui(ui, |ui| {
                 let mut add_value = |v| {
-                    changed |= ui
+                    if ui
                         .selectable_value(&mut options.view_mode, v, v.to_string())
-                        .changed();
+                        .changed()
+                    {
+                        action = HeaderAction::RequestProcess;
+                    }
                 };
+
                 add_value(ViewMode::AOnly);
                 add_value(ViewMode::BOnly);
                 add_value(ViewMode::Unified);
             });
 
-        changed
+        action
     })
     .inner
 }
@@ -489,7 +529,7 @@ impl DiffView {
         self.search_bar.update_data(diffs.search_results);
     }
 
-    fn show(&mut self, ui: &mut Ui) -> DiffViewAction {
+    fn show(&mut self, ui: &mut Ui, force_collapse_state: Option<bool>) -> DiffViewAction {
         // ScrollArea will expand to fill all remaining space, layout bottom to top so that we can
         // add a search bar at the bottom. Invert the layout again to get a normal layout for the
         // Scroll area
@@ -522,7 +562,7 @@ impl DiffView {
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         for idx in 0..self.processed_diffs.len() {
-                            self.show_diff(idx, jump_to_search, ui);
+                            self.show_diff(idx, force_collapse_state, jump_to_search, ui);
                         }
                     });
             });
@@ -531,7 +571,13 @@ impl DiffView {
         action
     }
 
-    fn show_diff(&mut self, diff_idx: usize, jump_to_search: bool, ui: &mut Ui) {
+    fn show_diff(
+        &mut self,
+        diff_idx: usize,
+        force_collapse_state: Option<bool>,
+        jump_to_search: bool,
+        ui: &mut Ui,
+    ) {
         const FONT_SIZE: f32 = 14.0;
 
         let diff = &self.processed_diffs[diff_idx];
@@ -558,7 +604,7 @@ impl DiffView {
             ui.fonts().layout_job(job)
         };
 
-        let mut header = CollapsingHeader::new(&diff.label);
+        let mut header = CollapsingHeader::new(&diff.label).open(force_collapse_state);
 
         if jump_to_search && diff_idx == self.search_bar.diff_idx() {
             header = header.open(Some(true));
