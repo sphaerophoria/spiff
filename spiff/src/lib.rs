@@ -395,6 +395,8 @@ impl SingleDiffProcessor<'_> {
             SegmentPurpose::Addition
         };
 
+        let start_length = self.processed_diff.len();
+
         for (idx, line) in self
             .lines_b
             .iter()
@@ -403,10 +405,10 @@ impl SingleDiffProcessor<'_> {
             .take(insertion.length)
         {
             self.process_line_numbers(None, Some(idx));
-            let start_length = self.processed_diff.len();
             writeln!(self.processed_diff, "+{}", line).expect("Failed to write line");
-            self.push_coloring_with_search_highlights(start_length, purpose.clone());
         }
+
+        self.push_coloring_with_search_highlights(start_length, purpose.clone());
     }
 
     fn process_removal(&mut self, removal: &libdiff::Removal, idx: usize) {
