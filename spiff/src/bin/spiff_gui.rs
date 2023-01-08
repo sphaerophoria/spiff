@@ -369,25 +369,19 @@ impl TextColorGenerator {
         use SegmentPurpose::*;
 
         match purpose {
-            Context => {
-                visuals.text_color()
-            }
-            Addition => {
-                Color32::LIGHT_GREEN
-            }
-            Removal => {
-                Color32::LIGHT_RED
-            }
+            Context => visuals.text_color(),
+            Addition => Color32::LIGHT_GREEN,
+            Removal => Color32::LIGHT_RED,
             MoveFrom(_) => {
                 self.last_movefrom = (self.last_movefrom + 1) % 2;
                 [Color32::KHAKI, Color32::from_rgb(0xdd, 0x98, 0x63)][self.last_movefrom as usize]
             }
             MoveTo(_) => {
                 self.last_moveto = (self.last_moveto + 1) % 2;
-                [Color32::LIGHT_BLUE, Color32::from_rgb(0x9d, 0xa1, 0xea)][self.last_moveto as usize]
+                [Color32::LIGHT_BLUE, Color32::from_rgb(0x9d, 0xa1, 0xea)]
+                    [self.last_moveto as usize]
             }
         }
-
     }
 }
 
@@ -598,11 +592,10 @@ impl DiffView {
 
         let diff = &self.processed_diffs[diff_idx];
 
-        let mut color_generator =  TextColorGenerator {
+        let mut color_generator = TextColorGenerator {
             last_movefrom: 0,
             last_moveto: 0,
         };
-
 
         let mut layouter = |ui: &Ui, s: &str, _wrap_width: f32| {
             // FIXME: memoize
@@ -619,7 +612,13 @@ impl DiffView {
                 job.append(
                     &s[range.clone()],
                     0.0,
-                    info_to_format(info, &mut color_generator, ui.visuals(), FONT_SIZE, select_color),
+                    info_to_format(
+                        info,
+                        &mut color_generator,
+                        ui.visuals(),
+                        FONT_SIZE,
+                        select_color,
+                    ),
                 );
             }
 

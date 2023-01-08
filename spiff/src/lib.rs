@@ -408,7 +408,7 @@ impl SingleDiffProcessor<'_> {
             writeln!(self.processed_diff, "+{}", line).expect("Failed to write line");
         }
 
-        self.push_coloring_with_search_highlights(start_length, purpose.clone());
+        self.push_coloring_with_search_highlights(start_length, purpose);
     }
 
     fn process_removal(&mut self, removal: &libdiff::Removal, idx: usize) {
