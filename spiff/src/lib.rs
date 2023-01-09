@@ -12,7 +12,7 @@ use libdiff::DiffAction;
 
 pub mod widget;
 
-#[derive(Copy, Eq, PartialEq, Clone)]
+#[derive(Hash, Copy, Eq, PartialEq, Clone)]
 pub enum ViewMode {
     AOnly,
     BOnly,
@@ -33,7 +33,7 @@ impl fmt::Display for ViewMode {
     }
 }
 
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Hash, Clone, Eq, PartialEq)]
 pub struct DiffOptions {
     pub context_lines: usize,
     pub track_moves: bool,
