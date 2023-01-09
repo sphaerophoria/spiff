@@ -109,6 +109,18 @@ impl DiffView {
     }
 
     pub fn show(&mut self, ui: &mut Ui, force_collapse_state: Option<bool>) -> DiffViewAction {
+        self.show_with_additional_content(ui, force_collapse_state, |_| {})
+    }
+
+    pub fn show_with_additional_content<F>(
+        &mut self,
+        ui: &mut Ui,
+        force_collapse_state: Option<bool>,
+        additional_content: F,
+    ) -> DiffViewAction
+    where
+        F: FnOnce(&mut Ui),
+    {
         // ScrollArea will expand to fill all remaining space, layout bottom to top so that we can
         // add a search bar at the bottom. Invert the layout again to get a normal layout for the
         // Scroll area
@@ -140,6 +152,8 @@ impl DiffView {
                 ScrollArea::both()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
+                        additional_content(ui);
+
                         for idx in 0..self.processed_diffs.len() {
                             self.show_diff(idx, force_collapse_state, jump_to_search, ui);
                         }
