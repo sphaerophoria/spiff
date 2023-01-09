@@ -148,16 +148,11 @@ impl<'a> DiffCollectionProcessor<'a> {
         self.diffs.clear();
 
         for i in 0..self.lines_a.len() {
-            let begin = std::time::Instant::now();
             let diff = if self.options.consider_whitespace {
                 libdiff::diff(&self.lines_a[i], &self.lines_b[i])
             } else {
                 libdiff::diff(&self.trimmed_lines_a[i], &self.trimmed_lines_b[i])
             };
-            let duration = (std::time::Instant::now() - begin).as_millis();
-            if duration > 300 {
-                println!("Diffing {} took {}", self.labels[i], duration);
-            }
             self.diffs.push(diff);
         }
 
