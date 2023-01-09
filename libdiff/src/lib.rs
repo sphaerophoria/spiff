@@ -119,6 +119,14 @@ where
     let mut best_x_for_k: Vec<i64> = vec![0; max_distance * 2 + 1];
     let mut trace = Vec::new();
 
+    if max_distance == 0 {
+        return vec![DiffAction::Traverse(Traversal {
+            a_idx: 0,
+            b_idx: 0,
+            length: 0,
+        })];
+    }
+
     let max_distance = max_distance as i64;
 
     'outer: for d in 0..=max_distance {
