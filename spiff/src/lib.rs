@@ -1,6 +1,8 @@
 use anyhow::{anyhow, Context, Result};
 use memmap2::Mmap;
+use sha2::{Digest, Sha256};
 use std::{
+    borrow::Cow,
     collections::{BTreeSet, HashMap},
     fmt::{self, Write as FmtWrite},
     fs,
@@ -99,10 +101,10 @@ pub struct ProcessedDiffData {
 pub struct DiffCollectionProcessor<'a> {
     options: DiffOptions,
     labels: &'a [String],
-    lines_a: Vec<Vec<&'a str>>,
-    lines_b: Vec<Vec<&'a str>>,
-    trimmed_lines_a: Vec<Vec<&'a str>>,
-    trimmed_lines_b: Vec<Vec<&'a str>>,
+    lines_a: Vec<Vec<Cow<'a, str>>>,
+    lines_b: Vec<Vec<Cow<'a, str>>>,
+    trimmed_lines_a: Vec<Vec<Cow<'a, str>>>,
+    trimmed_lines_b: Vec<Vec<Cow<'a, str>>>,
     diffs: Vec<Vec<DiffAction>>,
     matches: HashMap<(usize, usize), (usize, usize)>,
     search_query: String,
@@ -232,8 +234,8 @@ impl<'a> DiffCollectionProcessor<'a> {
 /// Takes diff/matches/files/options and generates a DiffViewFileData for a single file pair
 struct SingleDiffProcessor<'a> {
     options: &'a DiffOptions,
-    lines_a: &'a [&'a str],
-    lines_b: &'a [&'a str],
+    lines_a: &'a [Cow<'a, str>],
+    lines_b: &'a [Cow<'a, str>],
     label: &'a str,
     diffs: &'a [Vec<libdiff::DiffAction>],
     diff_idx: usize,
@@ -493,13 +495,23 @@ fn open_file<P: AsRef<Path>>(path: P) -> Result<Mmap> {
     Ok(mmap)
 }
 
-fn buf_to_lines(buf: &[u8]) -> Result<Vec<&str>> {
-    let s = std::str::from_utf8(buf).context("Failed to parse string")?;
+fn buf_to_lines(buf: &[u8]) -> Result<Vec<Cow<str>>> {
+    let s = match std::str::from_utf8(buf) {
+        Ok(s) => s,
+        Err(_) => {
+            let hash = Sha256::digest(buf);
+            let hash_str = hex::encode(hash);
+            return Ok(vec![Cow::Owned(format!(
+                "Binary file with sha256 digest: {}",
+                hash_str
+            ))]);
+        }
+    };
 
-    Ok(s.lines().collect())
+    Ok(s.lines().map(Cow::Borrowed).collect())
 }
 
-fn bufs_to_lines<C>(bufs: &[Option<C>]) -> Result<Vec<Vec<&str>>>
+fn bufs_to_lines<C>(bufs: &[Option<C>]) -> Result<Vec<Vec<Cow<str>>>>
 where
     C: AsRef<[u8]>,
 {
@@ -508,10 +520,17 @@ where
         .collect::<Result<Vec<_>>>()
 }
 
-fn trim_lines<'a>(lines: &[Vec<&'a str>]) -> Vec<Vec<&'a str>> {
+fn trim_lines<'a>(lines: &[Vec<Cow<'a, str>>]) -> Vec<Vec<Cow<'a, str>>> {
     lines
         .iter()
-        .map(|x| x.iter().map(|x| x.trim()).collect::<Vec<_>>())
+        .map(|x| {
+            x.iter()
+                .map(|x| match x {
+                    Cow::Owned(x) => Cow::Owned(x.trim().to_string()),
+                    Cow::Borrowed(x) => Cow::Borrowed(x.trim()),
+                })
+                .collect::<Vec<_>>()
+        })
         .collect::<Vec<_>>()
 }
 
