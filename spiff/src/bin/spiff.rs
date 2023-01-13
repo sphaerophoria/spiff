@@ -25,37 +25,49 @@ fn main() -> Result<()> {
         // Track "columns" manually since we have no vertical layout
         let mut line_number_lines = diff.line_numbers.lines();
 
-        for (range, info) in diff.display_info {
-            let color = match info.purpose {
-                SegmentPurpose::Context => None,
-                SegmentPurpose::Addition => Some(ansi_term::Colour::Green),
-                SegmentPurpose::Removal => Some(ansi_term::Colour::Red),
-                SegmentPurpose::MoveFrom(_) => Some(ansi_term::Colour::Yellow),
-                SegmentPurpose::MoveTo(_) => Some(ansi_term::Colour::Blue),
-            };
-
-            let start_color = || {
-                if let Some(color) = color.as_ref() {
-                    print!("{}", color.prefix());
-                }
-            };
-
-            let end_color = || {
-                if let Some(color) = color.as_ref() {
-                    print!("{}", color.suffix());
-                }
-            };
-
-            for line in diff.processed_diff[range].lines() {
-                end_color();
-                print!("{} ", line_number_lines.next().unwrap());
-
-                start_color();
-                println!("{}", line);
-            }
-
-            end_color();
+        if let Some(first_line) = line_number_lines.next() {
+            print!("{} ", first_line);
         }
+
+        let mut segment_iter = diff.display_info.into_iter().peekable();
+        while let Some((range, purpose)) = segment_iter.next() {
+            let is_last_segment = segment_iter.peek().is_none();
+            let segment_text = &diff.processed_diff[range];
+            let segment_ends_in_newline =
+                segment_text.ends_with("\r\n") || segment_text.ends_with('\n');
+
+            let style = match purpose {
+                SegmentPurpose::Context => None,
+                SegmentPurpose::Addition => Some(ansi_term::Colour::Green.normal()),
+                SegmentPurpose::Removal => Some(ansi_term::Colour::Red.normal()),
+                SegmentPurpose::MoveFrom(_) => Some(ansi_term::Colour::Yellow.normal()),
+                SegmentPurpose::MoveTo(_) => Some(ansi_term::Colour::Blue.normal()),
+                SegmentPurpose::MatchSearch => {
+                    Some(ansi_term::Style::new().on(ansi_term::Colour::Blue))
+                }
+                SegmentPurpose::TrailingWhitespace => {
+                    Some(ansi_term::Style::new().on(ansi_term::Colour::Red))
+                }
+            };
+
+            let mut lines = segment_text.lines().peekable();
+
+            while let Some(line) = lines.next() {
+                if let Some(style) = style {
+                    print!("{}", style.paint(line));
+                } else {
+                    print!("{}", line);
+                }
+
+                if lines.peek().is_some() || segment_ends_in_newline {
+                    println!();
+                    if !is_last_segment {
+                        print!("{}", line_number_lines.next().unwrap());
+                    }
+                }
+            }
+        }
+        println!();
     }
 
     Ok(())

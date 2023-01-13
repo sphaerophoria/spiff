@@ -9,8 +9,8 @@ use eframe::{
 };
 
 use crate::{
-    DiffOptions, DisplayInfo, ProcessedDiffCollection, ProcessedDiffData, ProcessedDiffIdx,
-    SegmentPurpose, ViewMode,
+    DiffOptions, ProcessedDiffCollection, ProcessedDiffData, ProcessedDiffIdx, SegmentPurpose,
+    ViewMode,
 };
 
 pub enum HeaderAction {
@@ -178,6 +178,7 @@ impl DiffView {
         let mut color_generator = TextColorGenerator {
             last_movefrom: 0,
             last_moveto: 0,
+            visuals: ui.visuals().clone(),
         };
 
         let mut layouter = |ui: &Ui, s: &str, _wrap_width: f32| {
@@ -195,13 +196,7 @@ impl DiffView {
                 job.append(
                     &s[range.clone()],
                     0.0,
-                    info_to_format(
-                        info,
-                        &mut color_generator,
-                        ui.visuals(),
-                        FONT_SIZE,
-                        select_color,
-                    ),
+                    info_to_format(info, &mut color_generator, FONT_SIZE, select_color),
                 );
             }
 
@@ -286,7 +281,7 @@ impl DiffView {
                     let mut hover_segment = None;
                     for segment in &diff.display_info {
                         if cursor_pos >= segment.0.start && cursor_pos < segment.0.end {
-                            hover_segment = Some(&segment.1.purpose)
+                            hover_segment = Some(&segment.1)
                         }
                     }
 
@@ -311,7 +306,7 @@ impl DiffView {
                     }
                 }
 
-                if jump_to_search {
+                if jump_to_search && self.search_bar.diff_idx() == diff_idx {
                     let string_idx = self.search_bar.string_idx();
 
                     let cursor = response.galley.from_ccursor(CCursor::new(string_idx));
@@ -329,14 +324,15 @@ impl DiffView {
 struct TextColorGenerator {
     last_movefrom: u8,
     last_moveto: u8,
+    visuals: Visuals,
 }
 
 impl TextColorGenerator {
-    fn color_from(&mut self, visuals: &Visuals, purpose: &SegmentPurpose) -> Color32 {
+    fn fg_color_from(&mut self, purpose: &SegmentPurpose) -> Color32 {
         use SegmentPurpose::*;
 
         match purpose {
-            Context => visuals.text_color(),
+            Context | TrailingWhitespace | MatchSearch => self.visuals.text_color(),
             Addition => Color32::LIGHT_GREEN,
             Removal => Color32::LIGHT_RED,
             MoveFrom(_) => {
@@ -350,12 +346,20 @@ impl TextColorGenerator {
             }
         }
     }
+
+    fn bg_color_from(&mut self, purpose: &SegmentPurpose, select_color: Color32) -> Color32 {
+        use SegmentPurpose::*;
+        match purpose {
+            TrailingWhitespace => Color32::LIGHT_RED,
+            MatchSearch => select_color,
+            _ => Color32::TRANSPARENT,
+        }
+    }
 }
 
 fn info_to_format(
-    info: &DisplayInfo,
+    purpose: &SegmentPurpose,
     color_generator: &mut TextColorGenerator,
-    visuals: &Visuals,
     font_size: f32,
     select_color: Color32,
 ) -> TextFormat {
@@ -364,11 +368,8 @@ fn info_to_format(
         ..Default::default()
     };
 
-    format.color = color_generator.color_from(visuals, &info.purpose);
-
-    if info.matches_search {
-        format.background = select_color;
-    }
+    format.color = color_generator.fg_color_from(purpose);
+    format.background = color_generator.bg_color_from(purpose, select_color);
 
     format
 }
