@@ -246,7 +246,9 @@ impl DiffView {
             Color32::KHAKI,
         );
 
-        let mut header = CollapsingHeader::new(label_job).open(force_collapse_state);
+        let mut header = CollapsingHeader::new(label_job)
+            .id_source(&diff.label)
+            .open(force_collapse_state);
 
         if jump_to_search && diff_idx == self.search_bar.diff_idx() {
             header = header.open(Some(true));
