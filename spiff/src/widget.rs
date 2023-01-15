@@ -2,16 +2,13 @@ use eframe::{
     egui::{
         self,
         text::{CCursor, LayoutJob},
-        Align, CollapsingHeader, Color32, ComboBox, DragValue, Label, Layout, RichText, ScrollArea,
-        TextEdit, TextFormat, TextStyle, Ui, Visuals,
+        Align, CollapsingHeader, Color32, ComboBox, DragValue, Label, Layout, RichText, TextEdit,
+        TextFormat, TextStyle, Ui, Visuals,
     },
     epaint::FontId,
 };
 
-use crate::{
-    DiffOptions, ProcessedDiffCollection, ProcessedDiffData, ProcessedDiffIdx, SegmentPurpose,
-    ViewMode,
-};
+use crate::{DiffOptions, ProcessedDiffData, ProcessedDiffIdx, SegmentPurpose, ViewMode};
 
 pub enum HeaderAction {
     RequestProcess,
@@ -81,21 +78,16 @@ pub fn show_header(options: &mut DiffOptions, ui: &mut Ui) -> HeaderAction {
     .inner
 }
 
-pub enum DiffViewAction {
-    UpdateSearch(String),
-    None,
-}
-
 pub struct DiffView {
     processed_diffs: Vec<ProcessedDiffData>,
-    search_bar: SearchBar,
+    highlight_idx: Option<(usize, usize)>,
 }
 
 impl DiffView {
-    pub fn new(diffs: ProcessedDiffCollection) -> DiffView {
+    pub fn new(diffs: Vec<ProcessedDiffData>) -> DiffView {
         let mut view = DiffView {
             processed_diffs: Vec::new(),
-            search_bar: SearchBar::new(),
+            highlight_idx: None,
         };
 
         view.update_data(diffs);
@@ -103,72 +95,30 @@ impl DiffView {
         view
     }
 
-    pub fn update_data(&mut self, diffs: ProcessedDiffCollection) {
-        self.processed_diffs = diffs.processed_diffs;
-        self.search_bar.update_data(diffs.search_results);
+    pub fn update_data(&mut self, diffs: Vec<ProcessedDiffData>) {
+        self.processed_diffs = diffs;
     }
 
-    pub fn show(&mut self, ui: &mut Ui, force_collapse_state: Option<bool>) -> DiffViewAction {
-        self.show_with_additional_content(ui, force_collapse_state, |_| {})
-    }
-
-    pub fn show_with_additional_content<F>(
+    pub fn show(
         &mut self,
         ui: &mut Ui,
+        jump_idx: Option<(usize, usize)>,
         force_collapse_state: Option<bool>,
-        additional_content: F,
-    ) -> DiffViewAction
-    where
-        F: FnOnce(&mut Ui),
-    {
-        // ScrollArea will expand to fill all remaining space, layout bottom to top so that we can
-        // add a search bar at the bottom. Invert the layout again to get a normal layout for the
-        // Scroll area
+    ) {
+        if let Some(idx) = &jump_idx {
+            self.highlight_idx = Some(*idx);
+        }
 
-        let outer_layout = *ui.layout();
-        let mut action = DiffViewAction::None;
-        ui.with_layout(Layout::bottom_up(Align::LEFT), |ui| {
-            let mut jump_to_search = false;
-
-            let search_bar_request_input =
-                if ui.input().key_down(egui::Key::F) && ui.input().modifiers.ctrl {
-                    self.search_bar.set_visible(true);
-                    true
-                } else {
-                    false
-                };
-
-            match self.search_bar.show(search_bar_request_input, ui) {
-                SearchBarAction::Jump => {
-                    jump_to_search = true;
-                }
-                SearchBarAction::UpdateSearch(query) => {
-                    action = DiffViewAction::UpdateSearch(query);
-                }
-                SearchBarAction::None => (),
-            }
-
-            ui.with_layout(outer_layout, |ui| {
-                ScrollArea::both()
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        additional_content(ui);
-
-                        for idx in 0..self.processed_diffs.len() {
-                            self.show_diff(idx, force_collapse_state, jump_to_search, ui);
-                        }
-                    });
-            });
-        });
-
-        action
+        for idx in 0..self.processed_diffs.len() {
+            self.show_diff(idx, force_collapse_state, jump_idx, ui);
+        }
     }
 
     fn show_diff(
         &mut self,
         diff_idx: usize,
         force_collapse_state: Option<bool>,
-        jump_to_search: bool,
+        jump_idx: Option<(usize, usize)>,
         ui: &mut Ui,
     ) {
         const FONT_SIZE: f32 = 14.0;
@@ -185,8 +135,8 @@ impl DiffView {
             // FIXME: memoize
             let mut job = LayoutJob::default();
             for (range, info) in &diff.display_info {
-                let select_color = if self.search_bar.diff_idx() == diff_idx
-                    && self.search_bar.string_idx() == range.start
+                let select_color = if self.highlight_idx.map(|x| x.0) == Some(diff_idx)
+                    && self.highlight_idx.map(|x| x.1) == Some(range.start)
                 {
                     Color32::from_rgb(0, 0xcb, 0xff)
                 } else {
@@ -250,7 +200,7 @@ impl DiffView {
             .id_source(&diff.label)
             .open(force_collapse_state);
 
-        if jump_to_search && diff_idx == self.search_bar.diff_idx() {
+        if jump_idx.map(|x| x.0) == Some(diff_idx) {
             header = header.open(Some(true));
         }
 
@@ -308,8 +258,8 @@ impl DiffView {
                     }
                 }
 
-                if jump_to_search && self.search_bar.diff_idx() == diff_idx {
-                    let string_idx = self.search_bar.string_idx();
+                if jump_idx.map(|x| x.0) == Some(diff_idx) {
+                    let string_idx = jump_idx.as_ref().unwrap().1;
 
                     let cursor = response.galley.from_ccursor(CCursor::new(string_idx));
                     let mut pos = response.galley.pos_from_cursor(&cursor);
@@ -376,13 +326,14 @@ fn info_to_format(
     format
 }
 
-enum SearchBarAction {
+#[derive(Eq, PartialEq)]
+pub enum SearchBarAction {
     Jump,
     UpdateSearch(String),
     None,
 }
 
-struct SearchBar {
+pub struct SearchBar {
     visible: bool,
     search_query: String,
     search_results: Vec<ProcessedDiffIdx>,
@@ -401,11 +352,11 @@ impl Default for SearchBar {
 }
 
 impl SearchBar {
-    fn new() -> SearchBar {
+    pub fn new() -> SearchBar {
         Default::default()
     }
 
-    fn update_data(&mut self, data: Vec<ProcessedDiffIdx>) {
+    pub fn update_data(&mut self, data: Vec<ProcessedDiffIdx>) {
         self.search_results = data;
         self.current_search_idx = 0;
     }
@@ -425,11 +376,11 @@ impl SearchBar {
         }
     }
 
-    fn set_visible(&mut self, visible: bool) {
+    pub fn set_visible(&mut self, visible: bool) {
         self.visible = visible;
     }
 
-    fn diff_idx(&self) -> usize {
+    pub fn diff_idx(&self) -> usize {
         if self.current_search_idx < self.search_results.len() {
             self.search_results[self.current_search_idx].diff_idx
         } else {
@@ -437,7 +388,7 @@ impl SearchBar {
         }
     }
 
-    fn string_idx(&self) -> usize {
+    pub fn string_idx(&self) -> usize {
         if self.current_search_idx < self.search_results.len() {
             self.search_results[self.current_search_idx].string_idx
         } else {
@@ -445,7 +396,7 @@ impl SearchBar {
         }
     }
 
-    fn show(&mut self, search_bar_request_input: bool, ui: &mut Ui) -> SearchBarAction {
+    pub fn show(&mut self, search_bar_request_input: bool, ui: &mut Ui) -> SearchBarAction {
         if !self.visible {
             return SearchBarAction::None;
         }
@@ -480,4 +431,44 @@ impl SearchBar {
 
         action
     }
+}
+
+pub struct SearchBarWrappedOutput<T> {
+    pub inner: T,
+    pub action: SearchBarAction,
+}
+
+pub fn search_bar_wrapped<T, F: FnOnce(&mut Ui, Option<(usize, usize)>) -> T>(
+    search_bar: &mut SearchBar,
+    ui: &mut Ui,
+    layout_fn: F,
+) -> SearchBarWrappedOutput<T> {
+    // Some widgets (e.g. ScrollArea) will expand to fill all remaining space, layout bottom to
+    // top so that we can add a search bar at the bottom. Invert the layout again to get a
+    // normal layout for the children
+
+    let outer_layout = *ui.layout();
+
+    ui.with_layout(Layout::bottom_up(Align::LEFT), |ui| {
+        let search_bar_request_input =
+            if ui.input().key_down(egui::Key::F) && ui.input().modifiers.ctrl {
+                search_bar.set_visible(true);
+                true
+            } else {
+                false
+            };
+
+        let action = search_bar.show(search_bar_request_input, ui);
+        let jump_idx = match &action {
+            SearchBarAction::Jump => Some((search_bar.diff_idx(), search_bar.string_idx())),
+            _ => None,
+        };
+
+        let inner = ui
+            .with_layout(outer_layout, |ui| layout_fn(ui, jump_idx))
+            .inner;
+
+        SearchBarWrappedOutput { inner, action }
+    })
+    .inner
 }

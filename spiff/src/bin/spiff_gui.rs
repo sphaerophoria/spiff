@@ -1,8 +1,11 @@
 use anyhow::{anyhow, Context, Result};
-use eframe::egui::{self, Align, Context as EContext, Layout, Ui};
+use eframe::egui::{self, Align, Context as EContext, Layout, ScrollArea, Ui};
 
 use spiff::{
-    widget::{self as spiff_widget, DiffView, DiffViewAction, HeaderAction},
+    widget::{
+        self as spiff_widget, search_bar_wrapped, DiffView, HeaderAction, SearchBar,
+        SearchBarAction,
+    },
     Contents, DiffCollectionProcessor, DiffOptions, ProcessedDiffCollection,
 };
 
@@ -169,6 +172,7 @@ struct Spiff {
     options: DiffOptions,
     status: DiffStatus,
     diff_view: Result<DiffView>,
+    search_bar: SearchBar,
     thread_tx: Sender<ThreadRequest>,
     thread_rx: Receiver<Result<ThreadResponse>>,
 }
@@ -196,6 +200,7 @@ impl Spiff {
         Spiff {
             status: DiffStatus::Processing,
             diff_view: Err(anyhow!("Waiting for initial evaluation")),
+            search_bar: SearchBar::default(),
             options,
             thread_tx: request_tx,
             thread_rx: response_rx,
@@ -225,14 +230,17 @@ impl eframe::App for Spiff {
                             num_diffs: processed_diffs.processed_diffs.len(),
                         };
                     }
+
                     match &mut self.diff_view {
                         Ok(v) => {
-                            v.update_data(processed_diffs);
+                            v.update_data(processed_diffs.processed_diffs);
                         }
                         Err(_) => {
-                            self.diff_view = Ok(DiffView::new(processed_diffs));
+                            self.diff_view = Ok(DiffView::new(processed_diffs.processed_diffs));
                         }
                     }
+
+                    self.search_bar.update_data(processed_diffs.search_results);
                 }
                 Err(e) => {
                     self.status = DiffStatus::Failure;
@@ -263,21 +271,23 @@ impl eframe::App for Spiff {
                 _ => None,
             };
 
-            match self.diff_view.as_mut() {
-                Ok(diff_view) => {
-                    if let DiffViewAction::UpdateSearch(query) =
-                        diff_view.show(ui, force_collapse_state)
-                    {
-                        self.thread_tx
-                            .send(ThreadRequest::SetSearchQuery(query))
-                            .unwrap();
-                    }
-                }
-                Err(e) => {
-                    ui.centered_and_justified(|ui| {
-                        ui.label(format!("Failed to render diff: {:?}", e));
+            let response = search_bar_wrapped(&mut self.search_bar, ui, |ui, jump_idx| {
+                ScrollArea::both()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| match self.diff_view.as_mut() {
+                        Ok(diff_view) => diff_view.show(ui, jump_idx, force_collapse_state),
+                        Err(e) => {
+                            ui.centered_and_justified(|ui| {
+                                ui.label(format!("Failed to render diff: {:?}", e));
+                            });
+                        }
                     });
-                }
+            });
+
+            if let SearchBarAction::UpdateSearch(query) = response.action {
+                self.thread_tx
+                    .send(ThreadRequest::SetSearchQuery(query))
+                    .unwrap();
             }
         });
     }
