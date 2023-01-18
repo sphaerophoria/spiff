@@ -231,19 +231,21 @@ fn insertions_removals_from_actions(
 }
 
 /// Calculates how similar the given insertion and removal are. Score is how many lines match
-fn calculate_match_score<U>(insertion: &Insertion, removal: &Removal, a: &[U], b: &[U]) -> usize
+fn calculate_match_score<U>(insertion: &Insertion, removal: &Removal, a: &[U], b: &[U]) -> f32
 where
     U: Eq + PartialEq,
 {
     let removal_content = &a[removal.a_idx..removal.a_idx + removal.length];
-    (insertion.b_idx..insertion.b_idx + insertion.length).fold(0, |acc, b_idx| {
+    let total = (insertion.b_idx..insertion.b_idx + insertion.length).fold(0.0, |acc, b_idx| {
         let insertion_item = &b[b_idx];
         if removal_content.contains(insertion_item) {
-            acc + 1
+            acc + 1.0
         } else {
             acc
         }
-    })
+    });
+
+    total / (removal.length + insertion.length) as f32
 }
 
 /// Splits input insertion and removal to get segments with either a 100% match score or a 0% match
@@ -319,12 +321,14 @@ fn replace_element_with_sequence<U: Eq + PartialEq>(elem: &U, seq: Vec<U>, vec: 
     vec.splice(position..position + 1, seq);
 }
 
-#[derive(Eq, PartialEq, Debug)]
+#[derive(PartialEq, Debug)]
 struct MatchCandidate {
-    score: usize,
+    score: f32,
     insertion: (usize, Insertion),
     removal: (usize, Removal),
 }
+
+impl Eq for MatchCandidate {}
 
 impl PartialOrd for MatchCandidate {
     fn partial_cmp(&self, rhs: &Self) -> Option<std::cmp::Ordering> {
@@ -336,7 +340,7 @@ impl PartialOrd for MatchCandidate {
 impl Ord for MatchCandidate {
     fn cmp(&self, rhs: &Self) -> std::cmp::Ordering {
         // Ignore insertion and removal in ordering. We only need to sort by the score
-        self.score.cmp(&rhs.score)
+        self.score.partial_cmp(&rhs.score).unwrap()
     }
 }
 
@@ -373,7 +377,7 @@ where
                 b[insertion.0].as_ref(),
             );
 
-            if score > 0 {
+            if score > 0.0 {
                 Some(MatchCandidate {
                     insertion: insertion.clone(),
                     removal: removal.clone(),
