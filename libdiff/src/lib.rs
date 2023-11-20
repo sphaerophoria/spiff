@@ -332,8 +332,7 @@ impl Eq for MatchCandidate {}
 
 impl PartialOrd for MatchCandidate {
     fn partial_cmp(&self, rhs: &Self) -> Option<std::cmp::Ordering> {
-        // Ignore insertion and removal in ordering. We only need to sort by the score
-        self.score.partial_cmp(&rhs.score)
+        Some(self.cmp(rhs))
     }
 }
 

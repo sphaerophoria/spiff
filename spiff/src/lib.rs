@@ -601,7 +601,7 @@ pub fn contents_from_roots<P: AsRef<Path>>(root_a: P, root_b: P) -> Result<Conte
     } else {
         // BTreeSet gives us free dedup and sorting
         let mut all_paths = paths_1.into_iter().collect::<BTreeSet<_>>();
-        all_paths.extend(paths_2.into_iter());
+        all_paths.extend(paths_2);
         let paths = all_paths.into_iter().collect::<Vec<_>>();
 
         let (content_a, content_b): (Vec<_>, Vec<_>) = paths
