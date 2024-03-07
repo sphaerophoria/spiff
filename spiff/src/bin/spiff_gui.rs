@@ -25,7 +25,8 @@ fn main() -> Result<()> {
         "Spiff",
         native_options,
         Box::new(|cc| Box::new(Spiff::new(cc, root_a, root_b))),
-    );
+    )
+    .expect("failed to create gui");
     Ok(())
 }
 

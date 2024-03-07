@@ -150,7 +150,7 @@ impl DiffView {
                 );
             }
 
-            ui.fonts().layout_job(job)
+            ui.fonts(|f| f.layout_job(job))
         };
 
         let mut label_job = LayoutJob::default();
@@ -223,7 +223,7 @@ impl DiffView {
 
                 let rect_min = response.response.rect.min;
                 let galley = std::sync::Arc::clone(&response.galley);
-                let pointer_pos = ui.input().pointer.hover_pos();
+                let pointer_pos = ui.input(|i| i.pointer.hover_pos());
                 if let Some(pointer_pos) = pointer_pos {
                     let cursor_pos = galley
                         .cursor_from_pos(egui::vec2(0.0, pointer_pos.y - rect_min.y))
@@ -263,8 +263,8 @@ impl DiffView {
 
                     let cursor = response.galley.from_ccursor(CCursor::new(string_idx));
                     let mut pos = response.galley.pos_from_cursor(&cursor);
-                    pos.min.x += response.text_draw_pos.x;
-                    pos.min.y += response.text_draw_pos.y;
+                    pos.min.x += response.galley_pos.x;
+                    pos.min.y += response.galley_pos.y;
                     pos.max = pos.min;
                     ui.scroll_to_rect(pos, Some(Align::Center));
                 }
@@ -405,9 +405,9 @@ impl SearchBar {
 
         let search_response = ui.text_edit_singleline(&mut self.search_query);
 
-        if search_response.lost_focus() && ui.input().key_pressed(egui::Key::Enter) {
+        if search_response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
             search_response.request_focus();
-            if ui.input().modifiers.shift {
+            if ui.input(|i| i.modifiers.shift) {
                 self.decrement_search_idx();
             } else {
                 self.increment_search_idx();
@@ -423,7 +423,7 @@ impl SearchBar {
             search_response.request_focus();
         }
 
-        if ui.input().key_down(egui::Key::Escape) {
+        if ui.input(|i| i.key_down(egui::Key::Escape)) {
             self.visible = false;
             self.search_query.clear();
             action = SearchBarAction::UpdateSearch(self.search_query.clone());
@@ -450,13 +450,13 @@ pub fn search_bar_wrapped<T, F: FnOnce(&mut Ui, Option<(usize, usize)>) -> T>(
     let outer_layout = *ui.layout();
 
     ui.with_layout(Layout::bottom_up(Align::LEFT), |ui| {
-        let search_bar_request_input =
-            if ui.input().key_down(egui::Key::F) && ui.input().modifiers.ctrl {
-                search_bar.set_visible(true);
-                true
-            } else {
-                false
-            };
+        let search_bar_request_input = if ui.input(|i| i.key_down(egui::Key::F) && i.modifiers.ctrl)
+        {
+            search_bar.set_visible(true);
+            true
+        } else {
+            false
+        };
 
         let action = search_bar.show(search_bar_request_input, ui);
         let jump_idx = match &action {

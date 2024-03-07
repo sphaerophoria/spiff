@@ -6,12 +6,12 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-anyhow = "1.0.68"
+anyhow = "1.0.80"
 ansi_term = "0.12.1"
 libdiff = { path = "../libdiff" }
-memmap2 = "0.5.8"
-lexopt = "0.2.1"
-eframe = "0.20.1"
-rfd = "0.10.0"
-sha2 = "0.10.6"
+memmap2 = "0.9.4"
+lexopt = "0.3.0"
+eframe = "0.26.2"
+rfd = "0.14.0"
+sha2 = "0.10.8"
 hex = "0.4.3"
