@@ -1,4 +1,5 @@
 use std::{
+    fmt,
     cmp::{Eq, PartialEq},
     collections::{BinaryHeap, HashMap, HashSet},
 };
@@ -106,12 +107,24 @@ impl DiffBuilder {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct OverMemoryLimitError {
+    required: usize,
+    maximum: usize,
+}
+
+impl fmt::Display for OverMemoryLimitError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "algorithm required {} bytes, which is over the maximum of {} bytes", self.required, self.maximum)
+    }
+}
+
 struct MyersTrace {
     data: Box<[i64]>,
 }
 
 impl MyersTrace {
-    fn new(a_len: usize, b_len: usize) -> MyersTrace {
+    fn new(a_len: usize, b_len: usize, max_mem_bytes: usize) -> Result<MyersTrace, OverMemoryLimitError> {
         let max_d = a_len + b_len;
 
         // k is iterated from [-d, d], on every other
@@ -131,9 +144,14 @@ impl MyersTrace {
         // * sum of integers is n(n + 1) / 2
         // so for 0..=max_d we need 1..=(max_d + 1) slots which is
         let num_slots = (max_d + 1) * (max_d + 2) / 2;
-        MyersTrace {
-            data: vec![0; num_slots].into(),
+
+        let required_mem_bytes = num_slots * std::mem::size_of::<i64>();
+        if required_mem_bytes > max_mem_bytes {
+            return Err(OverMemoryLimitError { required: required_mem_bytes, maximum: max_mem_bytes });
         }
+        Ok(MyersTrace {
+            data: vec![0; num_slots].into(),
+        })
     }
 
     fn get_mut(&mut self, d: i64, k: i64) -> &mut i64 {
@@ -151,7 +169,7 @@ impl MyersTrace {
 }
 
 /// Find a sequence of actions that applied to a results in b
-pub fn diff<U>(a: &[U], b: &[U]) -> Vec<DiffAction>
+pub fn diff<U>(a: &[U], b: &[U], max_memory_bytes: usize) -> Result<Vec<DiffAction>, OverMemoryLimitError>
 where
     U: Eq + PartialEq,
 {
@@ -160,14 +178,14 @@ where
     // http://www.xmailserver.org/diff2.pdf
     // https://blog.jcoglan.com/2017/02/12/the-myers-diff-algorithm-part-1/
     let max_distance = a.len() + b.len();
-    let mut trace = MyersTrace::new(a.len(), b.len());
+    let mut trace = MyersTrace::new(a.len(), b.len(), max_memory_bytes)?;
 
     if max_distance == 0 {
-        return vec![DiffAction::Traverse(Traversal {
+        return Ok(vec![DiffAction::Traverse(Traversal {
             a_idx: 0,
             b_idx: 0,
             length: 0,
-        })];
+        })]);
     }
 
     let max_distance = max_distance as i64;
@@ -265,7 +283,7 @@ where
     }
 
     builder.seq.reverse();
-    builder.seq
+    Ok(builder.seq)
 }
 
 /// Splits a sequence of diff actions into the insertions and removals that makes it up. Discards
@@ -319,7 +337,8 @@ fn split_insertion_removal_pair<U, C>(
     removal: &(usize, Removal),
     a: &[C],
     b: &[C],
-) -> (Vec<(usize, Insertion)>, Vec<(usize, Removal)>)
+    max_memory_bytes: usize,
+) -> Result<(Vec<(usize, Insertion)>, Vec<(usize, Removal)>), OverMemoryLimitError>
 where
     U: Eq + PartialEq,
     C: AsRef<[U]>,
@@ -332,7 +351,7 @@ where
     // If we diff the diff, we should find traversal segments which indicate 100% overlap. Each
     // insertion will correspond to one of the split insertions, each removal will correspond to
     // one of the split removals
-    let insertion_removal_diff = diff(removal_content, insertion_content);
+    let insertion_removal_diff = diff(removal_content, insertion_content, max_memory_bytes)?;
 
     let mut output_insertions = Vec::new();
     let mut output_removals = Vec::new();
@@ -376,7 +395,7 @@ where
         }
     }
 
-    (output_insertions, output_removals)
+    Ok((output_insertions, output_removals))
 }
 
 fn replace_element_with_sequence<U: Eq + PartialEq>(elem: &U, seq: Vec<U>, vec: &mut Vec<U>) {
@@ -468,7 +487,8 @@ pub fn match_insertions_removals<'a, U, C>(
     mut d: Vec<Vec<DiffAction>>,
     a: &[C],
     b: &[C],
-) -> MatchedDiffs
+    max_memory_bytes: usize,
+) -> Result<MatchedDiffs, OverMemoryLimitError>
 where
     U: Eq + PartialEq + 'a,
     C: AsRef<[U]> + Sync,
@@ -505,7 +525,8 @@ where
             &match_candidate.removal,
             a,
             b,
-        );
+            max_memory_bytes,
+        )?;
 
         if split_insertions.len() == 1 && split_removals.len() == 1 {
             insertion_matches.insert(split_insertions.pop().unwrap(), split_removals[0].clone());
@@ -583,7 +604,7 @@ where
         );
     }
 
-    MatchedDiffs { diffs: d, matches }
+    Ok(MatchedDiffs { diffs: d, matches })
 }
 
 #[cfg(test)]

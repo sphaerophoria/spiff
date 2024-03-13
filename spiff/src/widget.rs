@@ -73,6 +73,11 @@ pub fn show_header(options: &mut DiffOptions, ui: &mut Ui) -> HeaderAction {
                 add_value(ViewMode::Unified);
             });
 
+        if ui.add(egui::DragValue::new(&mut options.max_memory_mb)).changed() {
+            action = HeaderAction::RequestProcess;
+        }
+        ui.label("Max mem MB");
+
         action
     })
     .inner
@@ -296,6 +301,7 @@ impl TextColorGenerator {
                 [Color32::LIGHT_BLUE, Color32::from_rgb(0x9d, 0xa1, 0xea)]
                     [self.last_moveto as usize]
             }
+            Failed => Color32::LIGHT_RED
         }
     }
 
