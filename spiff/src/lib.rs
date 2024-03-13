@@ -247,7 +247,7 @@ impl<'a> DiffCollectionProcessor<'a> {
         for i in 0..self.lines_a.len() {
             let (data, single_search_results) = {
                 match &self.diffs[i] {
-                    Ok(diffs) => SingleDiffProcessor::new(SingleDiffProcessorInputs {
+                    Ok(_diffs) => SingleDiffProcessor::new(SingleDiffProcessorInputs {
                         options: &self.options,
                         lines_a: &self.lines_a[i],
                         lines_b: &self.lines_b[i],
