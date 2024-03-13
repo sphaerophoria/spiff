@@ -106,6 +106,49 @@ impl DiffBuilder {
     }
 }
 
+struct MyersTrace {
+    data: Box<[i64]>,
+}
+
+impl MyersTrace {
+    fn new(a_len: usize, b_len: usize) -> MyersTrace {
+        let max_d = a_len + b_len;
+
+        // k is iterated from [-d, d], on every other
+        // e.g.
+        //
+        //             k
+        //   ...-3-2-1 0 1 2 3...
+        //   . . . . . o . . . . .
+        //   . . . . o . o . . . .
+        // d . . . o . o . o . . .
+        //   . . o . o . o . o . .
+        //   . o . o . o . o . o .
+        //   o . o . o . o . o . o
+        //
+        // * For each value of d, we need 1 + d slots
+        // * d is iterated from 0 to max_d
+        // * sum of integers is n(n + 1) / 2
+        // so for 0..=max_d we need 1..=(max_d + 1) slots which is
+        let num_slots = (max_d + 1) * (max_d + 2) / 2;
+        MyersTrace {
+            data: vec![0; num_slots].into(),
+        }
+    }
+
+    fn get_mut(&mut self, d: i64, k: i64) -> &mut i64 {
+        // See new() for data layout
+        // Indexing is the same logic as generation. Generate the pyramid for d - 1, then move over
+        // by k slots
+        let k_start = (d) * (d + 1) / 2;
+        // k goes from -d to d, so for this row we need to map [-d, d] -> [0, 2d]
+        assert!(k >= -d && k <= d);
+        let unsigned_k = k + d;
+        let idx = (k_start + unsigned_k / 2) as usize;
+        &mut self.data[idx]
+    }
+}
+
 /// Find a sequence of actions that applied to a results in b
 pub fn diff<U>(a: &[U], b: &[U]) -> Vec<DiffAction>
 where
@@ -116,8 +159,7 @@ where
     // http://www.xmailserver.org/diff2.pdf
     // https://blog.jcoglan.com/2017/02/12/the-myers-diff-algorithm-part-1/
     let max_distance = a.len() + b.len();
-    let mut best_x_for_k: Vec<i64> = vec![0; max_distance * 2 + 1];
-    let mut trace = Vec::new();
+    let mut trace = MyersTrace::new(a.len(), b.len());
 
     if max_distance == 0 {
         return vec![DiffAction::Traverse(Traversal {
@@ -129,15 +171,23 @@ where
 
     let max_distance = max_distance as i64;
 
+    let mut shortest_edit_distance = 0;
     'outer: for d in 0..=max_distance {
-        trace.push(best_x_for_k.clone());
         for k in (-d..=d).step_by(2) {
-            let idx: usize = (k + max_distance).try_into().unwrap();
-
-            let mut x = if k == -d || (k != d && best_x_for_k[idx - 1] < best_x_for_k[idx + 1]) {
-                best_x_for_k[idx + 1]
+            let mut x = if d == 0 {
+                0
+            } else if k == -d {
+                *trace.get_mut(d - 1, k + 1)
+            } else if k == d {
+                *trace.get_mut(d - 1, k - 1) + 1
             } else {
-                best_x_for_k[idx - 1] + 1
+                let left = *trace.get_mut(d - 1, k - 1);
+                let right = *trace.get_mut(d - 1, k + 1);
+                if left < right {
+                    right
+                } else {
+                    left + 1
+                }
             };
 
             let mut y = x - k;
@@ -148,9 +198,10 @@ where
                 y += 1;
             }
 
-            best_x_for_k[idx] = x;
+            *trace.get_mut(d, k) = x;
 
             if x >= a.len() as i64 && y >= b.len() as i64 {
+                shortest_edit_distance = d;
                 break 'outer;
             }
         }
@@ -162,19 +213,30 @@ where
 
     let mut builder = DiffBuilder::default();
 
-    for (d, best_x_for_k) in trace.iter().enumerate().rev() {
-        let d = d as i64;
+    for d in (0..=shortest_edit_distance).rev() {
         let k = x - y;
-        let idx: usize = (k + max_distance).try_into().unwrap();
 
-        let prev_k = if k == -d || (k != d && best_x_for_k[idx - 1] < best_x_for_k[idx + 1]) {
+        let prev_k = if d == 0 {
+            0
+        } else if k == -d {
             k + 1
-        } else {
+        } else if k == d {
             k - 1
+        } else {
+            let left = *trace.get_mut(d - 1, k - 1);
+            let right = *trace.get_mut(d - 1, k + 1);
+            if left < right {
+                k + 1
+            } else {
+                k - 1
+            }
         };
 
-        let prev_idx: usize = (prev_k + max_distance).try_into().unwrap();
-        let prev_x = best_x_for_k[prev_idx];
+        let prev_x = if d == 0 {
+            0
+        } else {
+            *trace.get_mut(d - 1, prev_k)
+        };
         let prev_y = prev_x - prev_k;
 
         while x > prev_x && y > prev_y {
@@ -1186,5 +1248,28 @@ mod test {
         assert_eq!(matches.len(), 2);
         assert_eq!(matches.get(&(0, 1)), Some(&(1, 1)));
         assert_eq!(matches.get(&(1, 1)), Some(&(0, 1)));
+    }
+
+    #[test]
+    fn test_myers_trace() {
+        let mut trace = MyersTrace::new(2, 3);
+
+        assert_eq!(trace.data.len(), 6 + 5 + 4 + 3 + 2 + 1);
+
+        let mut val = 1;
+        for d in 0..=5 {
+            for k in (-d..d).step_by(2) {
+                *trace.get_mut(d, k) = val;
+                val += 1;
+            }
+        }
+
+        let mut val = 1;
+        for d in 0..=5 {
+            for k in (-d..d).step_by(2) {
+                assert_eq!(*trace.get_mut(d, k), val);
+                val += 1;
+            }
+        }
     }
 }
