@@ -1,7 +1,7 @@
 use std::{
-    fmt,
     cmp::{Eq, PartialEq},
     collections::{BinaryHeap, HashMap, HashSet},
+    fmt,
 };
 
 use rayon::prelude::*;
@@ -115,7 +115,11 @@ pub struct OverMemoryLimitError {
 
 impl fmt::Display for OverMemoryLimitError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "algorithm required {} bytes, which is over the maximum of {} bytes", self.required, self.maximum)
+        write!(
+            f,
+            "algorithm required {} bytes, which is over the maximum of {} bytes",
+            self.required, self.maximum
+        )
     }
 }
 
@@ -124,7 +128,11 @@ struct MyersTrace {
 }
 
 impl MyersTrace {
-    fn new(a_len: usize, b_len: usize, max_mem_bytes: usize) -> Result<MyersTrace, OverMemoryLimitError> {
+    fn new(
+        a_len: usize,
+        b_len: usize,
+        max_mem_bytes: usize,
+    ) -> Result<MyersTrace, OverMemoryLimitError> {
         let max_d = a_len + b_len;
 
         // k is iterated from [-d, d], on every other
@@ -147,7 +155,10 @@ impl MyersTrace {
 
         let required_mem_bytes = num_slots * std::mem::size_of::<i64>();
         if required_mem_bytes > max_mem_bytes {
-            return Err(OverMemoryLimitError { required: required_mem_bytes, maximum: max_mem_bytes });
+            return Err(OverMemoryLimitError {
+                required: required_mem_bytes,
+                maximum: max_mem_bytes,
+            });
         }
         Ok(MyersTrace {
             data: vec![0; num_slots].into(),
@@ -169,7 +180,11 @@ impl MyersTrace {
 }
 
 /// Find a sequence of actions that applied to a results in b
-pub fn diff<U>(a: &[U], b: &[U], max_memory_bytes: usize) -> Result<Vec<DiffAction>, OverMemoryLimitError>
+pub fn diff<U>(
+    a: &[U],
+    b: &[U],
+    max_memory_bytes: usize,
+) -> Result<Vec<DiffAction>, OverMemoryLimitError>
 where
     U: Eq + PartialEq,
 {
