@@ -48,6 +48,7 @@ fn main() -> Result<()> {
                 SegmentPurpose::TrailingWhitespace => {
                     Some(ansi_term::Style::new().on(ansi_term::Colour::Red))
                 }
+                SegmentPurpose::Failed => Some(ansi_term::Colour::Red.normal()),
             };
 
             let mut lines = segment_text.lines().peekable();

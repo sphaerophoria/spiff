@@ -73,6 +73,14 @@ pub fn show_header(options: &mut DiffOptions, ui: &mut Ui) -> HeaderAction {
                 add_value(ViewMode::Unified);
             });
 
+        if ui
+            .add(egui::DragValue::new(&mut options.max_memory_mb))
+            .changed()
+        {
+            action = HeaderAction::RequestProcess;
+        }
+        ui.label("Max mem MB");
+
         action
     })
     .inner
@@ -159,42 +167,51 @@ impl DiffView {
             label_job.append(s, 0.0, TextFormat::simple(label_fontid.clone(), color));
         };
 
-        label_append(&diff.label, ui.visuals().text_color());
-        label_append("\n", ui.visuals().text_color());
-        label_append(
-            &format!("{} ", diff.num_inserted_lines + diff.num_removed_lines),
-            ui.visuals().text_color(),
-        );
+        match diff.change_overview {
+            crate::ChangeOverview::Known {
+                num_inserted_lines,
+                num_removed_lines,
+                num_moved_insertions,
+                num_moved_removals,
+            } => {
+                label_append(&diff.label, ui.visuals().text_color());
+                label_append("\n", ui.visuals().text_color());
+                label_append(
+                    &format!("{} ", num_inserted_lines + num_removed_lines),
+                    ui.visuals().text_color(),
+                );
 
-        label_append(
-            std::str::from_utf8(&vec![
-                b'+';
-                ((diff.num_inserted_lines - diff.num_moved_insertions)
-                    + 1)
-                    / 2
-            ])
-            .unwrap(),
-            Color32::LIGHT_GREEN,
-        );
-        label_append(
-            std::str::from_utf8(&vec![b'+'; diff.num_moved_insertions / 2]).unwrap(),
-            Color32::LIGHT_BLUE,
-        );
+                label_append(
+                    std::str::from_utf8(&vec![
+                        b'+';
+                        ((num_inserted_lines - num_moved_insertions) + 1) / 2
+                    ])
+                    .unwrap(),
+                    Color32::LIGHT_GREEN,
+                );
+                label_append(
+                    std::str::from_utf8(&vec![b'+'; num_moved_insertions / 2]).unwrap(),
+                    Color32::LIGHT_BLUE,
+                );
 
-        label_append(
-            std::str::from_utf8(&vec![
-                b'-';
-                (diff.num_removed_lines - diff.num_moved_removals + 1)
-                    / 2
-            ])
-            .unwrap(),
-            Color32::LIGHT_RED,
-        );
+                label_append(
+                    std::str::from_utf8(&vec![
+                        b'-';
+                        (num_removed_lines - num_moved_removals + 1) / 2
+                    ])
+                    .unwrap(),
+                    Color32::LIGHT_RED,
+                );
 
-        label_append(
-            std::str::from_utf8(&vec![b'-'; diff.num_moved_removals / 2]).unwrap(),
-            Color32::KHAKI,
-        );
+                label_append(
+                    std::str::from_utf8(&vec![b'-'; num_moved_removals / 2]).unwrap(),
+                    Color32::KHAKI,
+                );
+            }
+            crate::ChangeOverview::Unknown => {
+                label_append(&format!("{}\n?????", &diff.label), Color32::LIGHT_RED);
+            }
+        }
 
         let mut header = CollapsingHeader::new(label_job)
             .id_source(&diff.label)
@@ -296,6 +313,7 @@ impl TextColorGenerator {
                 [Color32::LIGHT_BLUE, Color32::from_rgb(0x9d, 0xa1, 0xea)]
                     [self.last_moveto as usize]
             }
+            Failed => Color32::LIGHT_RED,
         }
     }
 

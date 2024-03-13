@@ -10,7 +10,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use libdiff::DiffAction;
+use libdiff::{DiffAction, OverMemoryLimitError};
 
 pub mod widget;
 
@@ -42,6 +42,7 @@ pub struct DiffOptions {
     pub consider_whitespace: bool,
     pub line_numbers: bool,
     pub view_mode: ViewMode,
+    pub max_memory_mb: usize,
 }
 
 impl Default for DiffOptions {
@@ -52,6 +53,7 @@ impl Default for DiffOptions {
             track_moves: true,
             line_numbers: true,
             view_mode: ViewMode::Unified,
+            max_memory_mb: 100,
         }
     }
 }
@@ -65,8 +67,24 @@ pub enum SegmentPurpose {
     MoveTo(DiffLineIdx),
     MatchSearch,
     TrailingWhitespace,
+    Failed,
 }
 
+#[derive(Debug)]
+enum DiffGenerationError {
+    GenerateDiffs(OverMemoryLimitError),
+    GenerateMatches(OverMemoryLimitError),
+}
+
+impl fmt::Display for DiffGenerationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        use DiffGenerationError::*;
+        match self {
+            GenerateDiffs(e) => write!(f, "failed to generate diffs: {e}"),
+            GenerateMatches(e) => write!(f, "failed to generate matches: {e}"),
+        }
+    }
+}
 #[derive(Debug, Hash, Clone, PartialEq, Eq)]
 pub struct DiffLineIdx {
     pub diff_idx: usize,
@@ -79,6 +97,16 @@ pub struct ProcessedDiffIdx {
     pub string_idx: usize,
 }
 
+pub enum ChangeOverview {
+    Known {
+        num_inserted_lines: usize,
+        num_removed_lines: usize,
+        num_moved_insertions: usize,
+        num_moved_removals: usize,
+    },
+    Unknown,
+}
+
 pub struct ProcessedDiffCollection {
     pub processed_diffs: Vec<ProcessedDiffData>,
     pub search_results: Vec<ProcessedDiffIdx>,
@@ -89,10 +117,7 @@ pub struct ProcessedDiffData {
     pub processed_diff: String,
     pub line_numbers: String,
     pub display_info: Vec<(std::ops::Range<usize>, SegmentPurpose)>,
-    pub num_inserted_lines: usize,
-    pub num_removed_lines: usize,
-    pub num_moved_insertions: usize,
-    pub num_moved_removals: usize,
+    pub change_overview: ChangeOverview,
 }
 
 pub struct DiffCollectionProcessor<'a> {
@@ -102,7 +127,7 @@ pub struct DiffCollectionProcessor<'a> {
     lines_b: Vec<Vec<Cow<'a, str>>>,
     trimmed_lines_a: Vec<Vec<Cow<'a, str>>>,
     trimmed_lines_b: Vec<Vec<Cow<'a, str>>>,
-    diffs: Vec<Vec<DiffAction>>,
+    diffs: Vec<Result<Vec<DiffAction>, DiffGenerationError>>,
     matches: HashMap<(usize, usize), (usize, usize)>,
     search_query: String,
 }
@@ -144,31 +169,59 @@ impl<'a> DiffCollectionProcessor<'a> {
     }
 
     fn recompute_diffs(&mut self) {
+        const MB_TO_B: usize = 1024 * 1024;
+        let max_mem_bytes = self.options.max_memory_mb * MB_TO_B;
         self.diffs.clear();
 
         for i in 0..self.lines_a.len() {
             let diff = if self.options.consider_whitespace {
-                libdiff::diff(&self.lines_a[i], &self.lines_b[i])
+                libdiff::diff(&self.lines_a[i], &self.lines_b[i], max_mem_bytes)
             } else {
-                libdiff::diff(&self.trimmed_lines_a[i], &self.trimmed_lines_b[i])
+                libdiff::diff(
+                    &self.trimmed_lines_a[i],
+                    &self.trimmed_lines_b[i],
+                    max_mem_bytes,
+                )
             };
-            self.diffs.push(diff);
+            self.diffs
+                .push(diff.map_err(DiffGenerationError::GenerateDiffs));
         }
 
-        (self.diffs, self.matches) = if self.options.track_moves {
+        let all_diffs_generated = self.diffs.iter().all(|v| v.is_ok());
+        (self.diffs, self.matches) = if self.options.track_moves && all_diffs_generated {
+            let num_diffs = self.diffs.len();
             let mut diffs = Vec::new();
             std::mem::swap(&mut diffs, &mut self.diffs);
 
+            let diffs: Vec<Vec<DiffAction>> = diffs.into_iter().map(|v| v.unwrap()).collect();
             let matched_diffs = if self.options.consider_whitespace {
-                libdiff::match_insertions_removals(diffs, &self.lines_a, &self.lines_b)
+                libdiff::match_insertions_removals(
+                    diffs,
+                    &self.lines_a,
+                    &self.lines_b,
+                    max_mem_bytes,
+                )
             } else {
                 libdiff::match_insertions_removals(
                     diffs,
                     &self.trimmed_lines_a,
                     &self.trimmed_lines_b,
+                    max_mem_bytes,
                 )
             };
-            (matched_diffs.diffs, matched_diffs.matches)
+
+            match matched_diffs {
+                Ok(v) => {
+                    let diffs = v.diffs.into_iter().map(Ok).collect();
+                    (diffs, v.matches)
+                }
+                Err(e) => (
+                    (0..num_diffs)
+                        .map(|_| Err(DiffGenerationError::GenerateMatches(e)))
+                        .collect(),
+                    HashMap::new(),
+                ),
+            }
         } else {
             let mut diffs = Vec::new();
             std::mem::swap(&mut diffs, &mut self.diffs);
@@ -192,18 +245,37 @@ impl<'a> DiffCollectionProcessor<'a> {
         let mut search_results = Vec::new();
 
         for i in 0..self.lines_a.len() {
-            let (data, single_search_results) =
-                SingleDiffProcessor::new(SingleDiffProcessorInputs {
-                    options: &self.options,
-                    lines_a: &self.lines_a[i],
-                    lines_b: &self.lines_b[i],
-                    label: &self.labels[i],
-                    diffs: &self.diffs,
-                    diff_idx: i,
-                    matches: &self.matches,
-                    search_query: &self.search_query,
-                })
-                .process();
+            let (data, single_search_results) = {
+                match &self.diffs[i] {
+                    Ok(_diffs) => SingleDiffProcessor::new(SingleDiffProcessorInputs {
+                        options: &self.options,
+                        lines_a: &self.lines_a[i],
+                        lines_b: &self.lines_b[i],
+                        label: &self.labels[i],
+                        diffs: &self.diffs,
+                        diff_idx: i,
+                        matches: &self.matches,
+                        search_query: &self.search_query,
+                    })
+                    .process(),
+                    Err(e) => {
+                        let processed_string = e.to_string();
+                        let display_info =
+                            vec![(0..processed_string.len(), SegmentPurpose::Failed)];
+                        let change_overview = ChangeOverview::Unknown;
+
+                        let data = ProcessedDiffData {
+                            label: self.labels[i].clone(),
+                            processed_diff: processed_string,
+                            line_numbers: "".to_string(),
+                            display_info,
+                            change_overview,
+                        };
+
+                        (data, Vec::new())
+                    }
+                }
+            };
 
             diffs.push(data);
             search_results.extend(single_search_results.into_iter().map(|string_idx| {
@@ -226,7 +298,7 @@ struct SingleDiffProcessorInputs<'a> {
     lines_a: &'a [Cow<'a, str>],
     lines_b: &'a [Cow<'a, str>],
     label: &'a str,
-    diffs: &'a [Vec<libdiff::DiffAction>],
+    diffs: &'a [Result<Vec<libdiff::DiffAction>, DiffGenerationError>],
     diff_idx: usize,
     matches: &'a std::collections::HashMap<(usize, usize), (usize, usize)>,
     search_query: &'a str,
@@ -238,7 +310,7 @@ struct SingleDiffProcessor<'a> {
     lines_a: &'a [Cow<'a, str>],
     lines_b: &'a [Cow<'a, str>],
     label: &'a str,
-    diffs: &'a [Vec<libdiff::DiffAction>],
+    diffs: &'a [Result<Vec<libdiff::DiffAction>, DiffGenerationError>],
     diff_idx: usize,
     matches: &'a std::collections::HashMap<(usize, usize), (usize, usize)>,
     search_query: &'a str,
@@ -279,14 +351,18 @@ impl<'a> SingleDiffProcessor<'a> {
     }
 
     fn process(mut self) -> (ProcessedDiffData, Vec<usize>) {
-        for (idx, action) in self.diffs[self.diff_idx].iter().enumerate() {
+        for (idx, action) in self.diffs[self.diff_idx].iter().flatten().enumerate() {
             use DiffAction::*;
             match action {
                 Traverse(traversal) => {
                     self.process_traversal(
                         traversal,
                         idx != 0,
-                        idx != self.diffs[self.diff_idx].len() - 1,
+                        idx != self.diffs[self.diff_idx]
+                            .as_ref()
+                            .map(|x| x.len())
+                            .unwrap_or(1)
+                            - 1,
                     );
                 }
                 Insert(insertion) => {
@@ -298,15 +374,18 @@ impl<'a> SingleDiffProcessor<'a> {
             }
         }
 
+        let change_overview = ChangeOverview::Known {
+            num_removed_lines: self.num_removed_lines,
+            num_inserted_lines: self.num_inserted_lines,
+            num_moved_insertions: self.num_moved_insertions,
+            num_moved_removals: self.num_moved_removals,
+        };
         let data = ProcessedDiffData {
             processed_diff: self.processed_diff,
             line_numbers: self.line_numbers,
             label: self.label.to_string(),
             display_info: self.display_info,
-            num_removed_lines: self.num_removed_lines,
-            num_inserted_lines: self.num_inserted_lines,
-            num_moved_insertions: self.num_moved_insertions,
-            num_moved_removals: self.num_moved_removals,
+            change_overview,
         };
 
         (data, self.search_results)
@@ -411,7 +490,10 @@ impl<'a> SingleDiffProcessor<'a> {
         }
 
         let purpose = if let Some((diff_idx, chunk_idx)) = self.matches.get(&(self.diff_idx, idx)) {
-            let line_idx = match &self.diffs[*diff_idx][*chunk_idx] {
+            let line_idx = match &self.diffs[*diff_idx]
+                .as_ref()
+                .expect("Should not resolve match with invalid diff")[*chunk_idx]
+            {
                 DiffAction::Remove(removal) => removal.a_idx,
                 _ => panic!("Invalid match"),
             };
@@ -448,7 +530,10 @@ impl<'a> SingleDiffProcessor<'a> {
         }
 
         let purpose = if let Some((diff_idx, chunk_idx)) = self.matches.get(&(self.diff_idx, idx)) {
-            let line_idx = match &self.diffs[*diff_idx][*chunk_idx] {
+            let line_idx = match &self.diffs[*diff_idx]
+                .as_ref()
+                .expect("Should not resolve match with invalid diff")[*chunk_idx]
+            {
                 DiffAction::Insert(insertion) => insertion.b_idx,
                 _ => panic!("Invalid match"),
             };
@@ -663,7 +748,7 @@ mod test {
     struct SingleDiffProcessorInputsBuilder {
         options: DiffOptions,
         label: String,
-        diffs: Vec<Vec<DiffAction>>,
+        diffs: Vec<Result<Vec<DiffAction>, DiffGenerationError>>,
         matches: std::collections::HashMap<(usize, usize), (usize, usize)>,
     }
 
@@ -673,11 +758,12 @@ mod test {
             lines_a: &'a [Cow<'a, str>],
             lines_b: &'a [Cow<'a, str>],
         ) -> SingleDiffProcessorInputs<'a> {
-            let diffs = vec![libdiff::diff(&lines_a, &lines_b)];
+            let diffs = vec![libdiff::diff(&lines_a, &lines_b, usize::MAX).unwrap()];
             let libdiff::MatchedDiffs { diffs, matches } =
-                libdiff::match_insertions_removals(diffs, &[lines_a], &[lines_b]);
+                libdiff::match_insertions_removals(diffs, &[lines_a], &[lines_b], usize::MAX)
+                    .unwrap();
 
-            self.diffs = diffs;
+            self.diffs = diffs.into_iter().map(Ok).collect();
             self.matches = matches;
 
             SingleDiffProcessorInputs {
@@ -763,10 +849,20 @@ mod test {
 
         let (process_output, _) = SingleDiffProcessor::new(builder.inputs(&b1, &b2)).process();
 
-        assert_eq!(process_output.num_inserted_lines, 7);
-        assert_eq!(process_output.num_moved_insertions, 2);
-        assert_eq!(process_output.num_removed_lines, 3);
-        assert_eq!(process_output.num_moved_removals, 2);
+        let ChangeOverview::Known {
+            num_inserted_lines,
+            num_moved_insertions,
+            num_removed_lines,
+            num_moved_removals,
+        } = process_output.change_overview
+        else {
+            panic!("change overview should be known")
+        };
+
+        assert_eq!(num_inserted_lines, 7);
+        assert_eq!(num_moved_insertions, 2);
+        assert_eq!(num_removed_lines, 3);
+        assert_eq!(num_moved_removals, 2);
 
         Ok(())
     }
