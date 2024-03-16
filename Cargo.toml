@@ -1,7 +1,8 @@
 [workspace]
 members = [
   "libdiff",
-  "spiff"
+  "spiff",
+  "diff_viz",
 ]
 
 [profile.release-with-debug]

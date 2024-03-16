@@ -123,6 +123,25 @@ impl fmt::Display for OverMemoryLimitError {
     }
 }
 
+fn get_prev_k(trace: &mut MyersTrace, d: i64, k: i64) -> i64 {
+    if d == 0 {
+        0
+    } else if k == -d {
+        k + 1
+    } else if k == d {
+        k - 1
+    } else {
+        let left = *trace.get_mut(d - 1, k - 1);
+        let right = *trace.get_mut(d - 1, k + 1);
+        if left < right {
+            k + 1
+        } else {
+            k - 1
+        }
+    }
+}
+
+#[derive(Debug)]
 struct MyersTrace {
     data: Box<[i64]>,
 }
@@ -178,6 +197,123 @@ impl MyersTrace {
     }
 }
 
+#[derive(Debug)]
+pub struct DiffAlgoDebugInfo {
+    // steps[k][line_segment]
+    pub steps: Vec<Vec<(i64, i64)>>
+}
+
+#[derive(PartialEq)]
+pub enum DiffAlgoAction {
+    Finish,
+    None,
+}
+
+#[derive(Debug)]
+pub struct DiffAlgo {
+    max_distance: i64,
+    trace: MyersTrace,
+    d: i64,
+    k: i64,
+}
+
+impl DiffAlgo
+{
+    pub fn new<U>(
+        a: &[U],
+        b: &[U],
+        max_memory_bytes: usize,
+    ) -> Result<DiffAlgo, OverMemoryLimitError> {
+        // Myers diff algorithm, no splitting into smaller segments
+        //
+        // http://www.xmailserver.org/diff2.pdf
+        // https://blog.jcoglan.com/2017/02/12/the-myers-diff-algorithm-part-1/
+        let max_distance = a.len() + b.len();
+        let trace = MyersTrace::new(a.len(), b.len(), max_memory_bytes)?;
+
+        let max_distance = max_distance as i64;
+
+        Ok(DiffAlgo {
+            max_distance,
+            trace,
+            d: 0,
+            k: -2,
+        })
+    }
+
+    pub fn x(&mut self, k: i64) -> i64 {
+        if self.d == 0 {
+            0
+        } else if k == -self.d {
+            *self.trace.get_mut(self.d - 1, k + 1)
+        } else if k == self.d {
+            *self.trace.get_mut(self.d - 1, k - 1) + 1
+        } else {
+            let left = *self.trace.get_mut(self.d - 1, k - 1);
+            let right = *self.trace.get_mut(self.d - 1, k + 1);
+            if left < right {
+                right
+            } else {
+                left + 1
+            }
+        }
+    }
+
+    pub fn step<U: PartialEq>(&mut self, a: &[U], b: &[U]) -> DiffAlgoAction {
+        self.k += 2;
+        if self.k > self.d {
+            self.d += 1;
+            self.k = -self.d;
+        }
+
+        let mut x = self.x(self.k);
+
+        let mut y = x - self.k;
+        assert!(y >= 0);
+
+        while x < a.len() as i64 && y < b.len() as i64 && a[x as usize] == b[y as usize] {
+            x += 1;
+            y += 1;
+        }
+
+        *self.trace.get_mut(self.d, self.k) = x;
+
+        if x >= a.len() as i64 && y >= b.len() as i64 {
+            return DiffAlgoAction::Finish;
+        }
+
+
+        DiffAlgoAction::None
+    }
+
+    pub fn debug_info(&mut self) -> DiffAlgoDebugInfo {
+        if self.k < -self.d || self.k > self.d {
+            return DiffAlgoDebugInfo {
+                steps: Vec::new(),
+            }
+        }
+        let mut steps = Vec::new();
+
+        for k in (-self.d..=self.d).step_by(2) {
+            if k > self.k {
+                break;
+            }
+
+
+            let x = *self.trace.get_mut(self.d, k);
+            let y = x - k;
+            let backwards_iter = MyersBackwardsIterator::new(self.d, x, y, &mut self.trace);
+            let mut steps_for_k: Vec<(i64, i64)> = backwards_iter.collect();
+            steps_for_k.reverse();
+            steps.push(steps_for_k);
+        }
+
+        DiffAlgoDebugInfo {
+            steps
+        }
+    }
+}
+
 /// Find a sequence of actions that applied to a results in b
 pub fn diff<U>(
     a: &[U],
@@ -191,10 +327,8 @@ where
     //
     // http://www.xmailserver.org/diff2.pdf
     // https://blog.jcoglan.com/2017/02/12/the-myers-diff-algorithm-part-1/
-    let max_distance = a.len() + b.len();
-    let mut trace = MyersTrace::new(a.len(), b.len(), max_memory_bytes)?;
-
-    if max_distance == 0 {
+    let mut algo = DiffAlgo::new(a, b, max_memory_bytes)?;
+    if algo.max_distance == 0 {
         return Ok(vec![DiffAction::Traverse(Traversal {
             a_idx: 0,
             b_idx: 0,
@@ -202,102 +336,140 @@ where
         })]);
     }
 
-    let max_distance = max_distance as i64;
+    while algo.step(a, b) != DiffAlgoAction::Finish {}
 
-    let mut shortest_edit_distance = 0;
-    'outer: for d in 0..=max_distance {
-        for k in (-d..=d).step_by(2) {
-            let mut x = if d == 0 {
-                0
-            } else if k == -d {
-                *trace.get_mut(d - 1, k + 1)
-            } else if k == d {
-                *trace.get_mut(d - 1, k - 1) + 1
-            } else {
-                let left = *trace.get_mut(d - 1, k - 1);
-                let right = *trace.get_mut(d - 1, k + 1);
-                if left < right {
-                    right
-                } else {
-                    left + 1
-                }
-            };
+    let shortest_edit_distance = algo.d;
+    let mut trace = algo.trace;
 
-            let mut y = x - k;
-            assert!(y >= 0);
-
-            while x < a.len() as i64 && y < b.len() as i64 && a[x as usize] == b[y as usize] {
-                x += 1;
-                y += 1;
-            }
-
-            *trace.get_mut(d, k) = x;
-
-            if x >= a.len() as i64 && y >= b.len() as i64 {
-                shortest_edit_distance = d;
-                break 'outer;
-            }
-        }
-    }
-
-    let mut path = Vec::new();
-    let mut x = a.len() as i64;
-    let mut y = b.len() as i64;
 
     let mut builder = DiffBuilder::default();
 
-    for d in (0..=shortest_edit_distance).rev() {
-        let k = x - y;
+    let x = a.len() as i64;
+    let y = b.len() as i64;
+    let mut it = MyersBackwardsIterator::new(shortest_edit_distance, x, y, &mut trace);
 
-        let prev_k = if d == 0 {
-            0
-        } else if k == -d {
-            k + 1
-        } else if k == d {
-            k - 1
+    // FIXME: invalid unwrap?
+    let last = it.next().unwrap();
+    let mut prev_x = last.0;
+    let mut prev_y = last.1;
+    for (x, y) in it {
+        assert!( x >= 0 && y >= 0);
+        if prev_y == y {
+            builder.push_removal(x as usize);
+        } else if prev_x == x {
+            builder.push_insertion(y as usize);
         } else {
-            let left = *trace.get_mut(d - 1, k - 1);
-            let right = *trace.get_mut(d - 1, k + 1);
-            if left < right {
-                k + 1
-            } else {
-                k - 1
-            }
-        };
-
-        let prev_x = if d == 0 {
-            0
-        } else {
-            *trace.get_mut(d - 1, prev_k)
-        };
-        let prev_y = prev_x - prev_k;
-
-        while x > prev_x && y > prev_y {
-            x -= 1;
-            y -= 1;
-            if y < 0 {
-                y = 0
-            };
-            path.push((x, y));
             builder.push_traversed_item(x as usize, y as usize);
         }
+        prev_x = x;
+        prev_y = y;
 
-        if d > 0 {
-            if prev_y == y {
-                builder.push_removal(prev_x as usize);
-            } else if prev_x == x {
-                builder.push_insertion(prev_y as usize);
-            } else {
-                panic!();
-            }
-        }
-
-        x = prev_x;
-        y = prev_y;
     }
+
+    //for d in (0..=shortest_edit_distance).rev() {
+    //    let k = x - y;
+
+    //    let prev_k = get_prev_k(&mut trace, d, k);
+
+    //    let prev_x = if d == 0 {
+    //        0
+    //    } else {
+    //        *trace.get_mut(d - 1, prev_k)
+    //    };
+    //    let prev_y = prev_x - prev_k;
+
+    //    while x > prev_x && y > prev_y {
+    //        x -= 1;
+    //        y -= 1;
+    //        if y < 0 {
+    //            y = 0
+    //        };
+    //        builder.push_traversed_item(x as usize, y as usize);
+    //    }
+
+    //    if d > 0 {
+    //        if prev_y == y {
+    //            builder.push_removal(prev_x as usize);
+    //        } else if prev_x == x {
+    //            builder.push_insertion(prev_y as usize);
+    //        } else {
+    //            panic!();
+    //        }
+    //    }
+
+    //    x = prev_x;
+    //    y = prev_y;
+    //}
 
     builder.seq.reverse();
     Ok(builder.seq)
+}
+
+#[derive(Debug)]
+struct MyersBackwardsIterator<'a> {
+    first_iter: bool,
+    d: i64,
+    x: i64,
+    y: i64,
+    trace: &'a mut MyersTrace
+}
+
+impl MyersBackwardsIterator<'_> {
+    fn new(d: i64, x: i64, y: i64, trace: &mut MyersTrace) -> MyersBackwardsIterator {
+        MyersBackwardsIterator {
+            first_iter: true,
+            d,
+            x,
+            y,
+            trace,
+        }
+    }
+}
+
+impl Iterator for MyersBackwardsIterator<'_> {
+    type Item = (i64, i64);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        // FIXME: Surely we can encode this information without this bool
+        if self.first_iter {
+            self.first_iter = false;
+            return Some((self.x, self.y))
+        }
+
+        if self.d < 0 {
+            return None;
+        }
+
+        let k = self.x - self.y;
+
+        let prev_k = get_prev_k(self.trace, self.d, k);
+
+        let prev_x = if self.d == 0 {
+            0
+        } else {
+            *self.trace.get_mut(self.d - 1, prev_k)
+        };
+        // o -- o
+        //       \
+        //        \
+        //         o
+        let prev_y = prev_x - prev_k;
+
+        if self.x > prev_x && self.y > prev_y {
+            self.x -= 1;
+            self.y -= 1;
+            if self.y < 0 {
+                self.y = 0
+            };
+        } else {
+            self.d -= 1;
+            self.x = prev_x;
+            self.y = prev_y;
+
+        }
+
+        Some((self.x, self.y))
+    }
 }
 
 /// Splits a sequence of diff actions into the insertions and removals that makes it up. Discards
