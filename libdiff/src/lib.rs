@@ -123,7 +123,7 @@ impl fmt::Display for OverMemoryLimitError {
     }
 }
 
-fn get_prev_k(trace: &mut MyersTrace, d: i64, k: i64) -> i64 {
+fn get_prev_k<T: MyersTraceIf>(trace: &mut T, d: i64, k: i64) -> i64 {
     if d == 0 {
         0
     } else if k == -d {
@@ -141,8 +141,13 @@ fn get_prev_k(trace: &mut MyersTrace, d: i64, k: i64) -> i64 {
     }
 }
 
+
+pub trait MyersTraceIf {
+    fn get_mut(&mut self, d: i64, k: i64) -> &mut i64;
+}
+
 #[derive(Debug)]
-struct MyersTrace {
+pub struct MyersTrace {
     data: Box<[i64]>,
 }
 
@@ -183,7 +188,9 @@ impl MyersTrace {
             data: vec![0; num_slots].into(),
         })
     }
+}
 
+impl MyersTraceIf for MyersTrace {
     fn get_mut(&mut self, d: i64, k: i64) -> &mut i64 {
         // See new() for data layout
         // Indexing is the same logic as generation. Generate the pyramid for d - 1, then move over
@@ -198,9 +205,59 @@ impl MyersTrace {
 }
 
 #[derive(Debug)]
+pub struct ForgetfulMyersTrace {
+    data: Box<[i64]>,
+    max_distance: usize,
+}
+
+impl ForgetfulMyersTrace {
+    fn new(
+        a_len: usize,
+        b_len: usize,
+    ) -> ForgetfulMyersTrace {
+        let max_distance = a_len + b_len;
+        let num_slots = 2 * max_distance + 1;
+
+        ForgetfulMyersTrace {
+            data: vec![0; num_slots].into(),
+            max_distance,
+        }
+    }
+}
+
+impl MyersTraceIf for ForgetfulMyersTrace {
+    fn get_mut(&mut self, _d: i64, k: i64) -> &mut i64 {
+        // k is in -d..d
+        // data is in [0..2d +1
+        let idx = k + self.max_distance as i64;
+        debug_assert!(idx < self.data.len() as i64 && idx >= 0);
+        &mut self.data[idx as usize]
+    }
+}
+
+#[derive(Debug)]
+enum AlgoTrace {
+    Full(MyersTrace),
+    Forgetful(ForgetfulMyersTrace),
+}
+
+impl AlgoTrace {
+    fn get_mut(&mut self, d: i64, k: i64) -> &mut i64 {
+        match self {
+            AlgoTrace::Full(x) => x.get_mut(d, k),
+            AlgoTrace::Forgetful(x) => x.get_mut(d, k),
+        }
+    }
+}
+
+#[derive(Debug)]
 pub struct DiffAlgoDebugInfo {
     // steps[k][line_segment]
-    pub steps: Vec<Vec<(i64, i64)>>
+    pub steps: Vec<Vec<(i64, i64)>>,
+    pub top: i64,
+    pub left: i64,
+    pub bottom: i64,
+    pub right: i64,
 }
 
 #[derive(PartialEq)]
@@ -212,13 +269,17 @@ pub enum DiffAlgoAction {
 #[derive(Debug)]
 pub struct DiffAlgo {
     max_distance: i64,
-    trace: MyersTrace,
+    trace: AlgoTrace,
     d: i64,
     k: i64,
     /// Search begin y
     top: i64,
     /// Search begin x
     left: i64,
+    /// Search end y
+    bottom: i64,
+    /// Search end x
+    right: i64,
 
 }
 
@@ -229,27 +290,59 @@ impl DiffAlgo
         b: &[U],
         top: i64,
         left: i64,
+        bottom: i64,
+        right: i64,
         max_memory_bytes: usize,
     ) -> Result<DiffAlgo, OverMemoryLimitError> {
+        let trace = MyersTrace::new(a.len(), b.len(), max_memory_bytes)?;
+        Ok(Self::new_with_trace(a, b, top, left, bottom, right, AlgoTrace::Full(trace)))
+    }
+
+    pub fn new_forgetful<U>(
+        a: &[U],
+        b: &[U],
+        top: i64,
+        left: i64,
+        bottom: i64,
+        right: i64,
+    ) -> DiffAlgo {
+        let trace = ForgetfulMyersTrace::new(a.len(), b.len());
+        Self::new_with_trace(a, b, top, left, bottom, right, AlgoTrace::Forgetful(trace))
+    }
+
+    fn new_with_trace<U>(
+        a: &[U],
+        b: &[U],
+        top: i64,
+        left: i64,
+        bottom: i64,
+        right: i64,
+        trace: AlgoTrace
+    ) -> DiffAlgo {
         // Myers diff algorithm, no splitting into smaller segments
         //
         // http://www.xmailserver.org/diff2.pdf
         // https://blog.jcoglan.com/2017/02/12/the-myers-diff-algorithm-part-1/
-        let max_distance = a.len() + b.len();
-        let trace = MyersTrace::new(a.len(), b.len(), max_memory_bytes)?;
-
-        let max_distance = max_distance as i64;
+        assert!(bottom >= top);
+        assert!(right >= left);
+        assert!((0..=a.len() as i64).contains(&left));
+        assert!((0..=a.len() as i64).contains(&right));
+        assert!((0..=b.len() as i64).contains(&top));
+        assert!((0..=b.len() as i64).contains(&bottom));
+        let max_distance = (bottom - top) + (right - left);
 
         assert!(top >= 0);
         assert!(left >= 0);
-        Ok(DiffAlgo {
+        DiffAlgo {
             max_distance,
             trace,
             d: 0,
             k: -2,
             top,
             left,
-        })
+            bottom,
+            right,
+        }
     }
 
     pub fn x(&mut self, k: i64) -> i64 {
@@ -271,17 +364,26 @@ impl DiffAlgo
     }
 
     pub fn step<U: PartialEq>(&mut self, a: &[U], b: &[U]) -> DiffAlgoAction {
-        let a = &a[self.left as usize..];
-        let b = &b[self.top as usize..];
-        self.k += 2;
-        if self.k > self.d {
-            self.d += 1;
-            self.k = -self.d;
+        let a = &a[self.left as usize..self.right as usize];
+        let b = &b[self.top as usize..self.bottom as usize];
+
+        let mut x;
+        let mut y;
+        loop {
+            self.k += 2;
+            if self.k > self.d {
+                self.d += 1;
+                self.k = -self.d;
+            }
+
+            x = self.x(self.k);
+
+            y = x - self.k;
+            if x <= self.right - self.left && y <= self.bottom - self.top {
+                break;
+            }
+            *self.trace.get_mut(self.d, self.k) = x;
         }
-
-        let mut x = self.x(self.k);
-
-        let mut y = x - self.k;
         assert!(y >= 0);
 
         while x < a.len() as i64 && y < b.len() as i64 && a[x as usize] == b[y as usize] {
@@ -303,6 +405,10 @@ impl DiffAlgo
         if self.k < -self.d || self.k > self.d {
             return DiffAlgoDebugInfo {
                 steps: Vec::new(),
+                top: self.top,
+                left: self.left,
+                right: self.right,
+                bottom: self.bottom,
             }
         }
         let mut steps = Vec::new();
@@ -315,15 +421,28 @@ impl DiffAlgo
 
             let x = *self.trace.get_mut(self.d, k);
             let y = x - k;
-            let backwards_iter = MyersBackwardsIterator::new(self.d, x, y, &mut self.trace);
-            let mut steps_for_k: Vec<(i64, i64)> = backwards_iter.map(|(x, y)| (x + self.left, y + self.top)).collect();
+            // FIXME: 0 is not the d limit
+            let mut steps_for_k: Vec<(i64, i64)> = match &mut self.trace {
+                AlgoTrace::Full(trace) => {
+                    let backwards_iter = MyersBackwardsIterator::new(self.d, 0, x, y, trace);
+                    backwards_iter.map(|(x, y)| (x + self.left, y + self.top)).collect()
+                }
+                AlgoTrace::Forgetful(trace) => {
+                    let backwards_iter = MyersBackwardsIterator::new(self.d, self.d - 1, x, y, trace);
+                    backwards_iter.map(|(x, y)| (x + self.left, y + self.top)).collect()
+                }
+            };
 
             steps_for_k.reverse();
             steps.push(steps_for_k);
         }
 
         DiffAlgoDebugInfo {
-            steps
+            steps,
+            top: self.top,
+            left: self.left,
+            right: self.right,
+            bottom: self.bottom,
         }
     }
 }
@@ -341,7 +460,7 @@ where
     //
     // http://www.xmailserver.org/diff2.pdf
     // https://blog.jcoglan.com/2017/02/12/the-myers-diff-algorithm-part-1/
-    let mut algo = DiffAlgo::new(a, b, 0, 0, max_memory_bytes)?;
+    let mut algo = DiffAlgo::new(a, b, 0, 0, b.len() as i64, a.len() as i64, max_memory_bytes)?;
     if algo.max_distance == 0 {
         return Ok(vec![DiffAction::Traverse(Traversal {
             a_idx: 0,
@@ -354,13 +473,15 @@ where
 
     let shortest_edit_distance = algo.d;
     let mut trace = algo.trace;
-
+    let AlgoTrace::Full(mut trace) = trace else {
+        panic!("Unexpected forgetful trace");
+    };
 
     let mut builder = DiffBuilder::default();
 
     let x = a.len() as i64;
     let y = b.len() as i64;
-    let mut it = MyersBackwardsIterator::new(shortest_edit_distance, x, y, &mut trace);
+    let mut it = MyersBackwardsIterator::new(shortest_edit_distance, 0, x, y, &mut trace);
 
     // FIXME: invalid unwrap?
     let last = it.next().unwrap();
@@ -420,18 +541,20 @@ where
 }
 
 #[derive(Debug)]
-struct MyersBackwardsIterator<'a> {
+struct MyersBackwardsIterator<'a, T> {
     first_iter: bool,
+    d_limit: i64,
     d: i64,
     x: i64,
     y: i64,
-    trace: &'a mut MyersTrace
+    trace: &'a mut T
 }
 
-impl MyersBackwardsIterator<'_> {
-    fn new(d: i64, x: i64, y: i64, trace: &mut MyersTrace) -> MyersBackwardsIterator {
+impl<T: MyersTraceIf> MyersBackwardsIterator<'_, T> {
+    fn new(d: i64, d_limit: i64, x: i64, y: i64, trace: &mut T) -> MyersBackwardsIterator<'_, T> {
         MyersBackwardsIterator {
             first_iter: true,
+            d_limit,
             d,
             x,
             y,
@@ -440,7 +563,7 @@ impl MyersBackwardsIterator<'_> {
     }
 }
 
-impl Iterator for MyersBackwardsIterator<'_> {
+impl<T: MyersTraceIf> Iterator for MyersBackwardsIterator<'_, T> {
     type Item = (i64, i64);
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -450,7 +573,7 @@ impl Iterator for MyersBackwardsIterator<'_> {
             return Some((self.x, self.y))
         }
 
-        if self.d < 0 {
+        if self.d <= self.d_limit {
             return None;
         }
 

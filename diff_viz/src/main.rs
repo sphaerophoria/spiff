@@ -1,10 +1,13 @@
-use libdiff::{DiffAlgo, DiffAlgoAction, DiffAlgoDebugInfo};
+use libdiff::{DiffAlgo, DiffAlgoAction, DiffAlgoDebugInfo, MyersTrace};
 use eframe::{egui::{self, Galley, Vec2, TextStyle, Painter, Color32, Pos2, Ui}, epaint::Stroke};
 use std::{sync::Arc, rc::Rc, pin::Pin};
 
 struct Args {
-    top: usize,
-    left: usize,
+    top: Option<usize>,
+    bottom: Option<usize>,
+    left: Option<usize>,
+    right: Option<usize>,
+    forgetful: bool,
 }
 
 impl Args {
@@ -12,15 +15,17 @@ impl Args {
         let program_name = it.next().unwrap_or_else(|| "diff_viz".to_string());
 
         let mut top = None;
+        let mut bottom = None;
         let mut left = None;
+        let mut right = None;
+        let mut forgetful = false;
         while let Some(arg) = it.next() {
             match arg.as_ref() {
-                "--top" => {
-                    top = it.next();
-                }
-                "--left" => {
-                    left = it.next();
-                }
+                "--top" => top = it.next(),
+                "--left" => left = it.next(),
+                "--right" => right = it.next(),
+                "--bottom" => bottom = it.next(),
+                "--forgetful" => forgetful = true,
                 "--help" => {
                     Self::help(&program_name);
                 }
@@ -32,13 +37,19 @@ impl Args {
         }
 
         let res = (|| -> Result<Args, &'static str> {
-            let top = top.unwrap_or_else(|| 0.to_string());
-            let left = left.unwrap_or_else(|| 0.to_string());
-            let top = top.parse().map_err(|_| "top is not a valid usize")?;
-            let left = left.parse().map_err(|_| "top is not a valid usize")?;
+            macro_rules! parse_arg {
+                ($x:expr) => {{
+                    let res = $x.map(|x| x.parse().map_err(|_| concat!(stringify!($x), " is not a valid usize")));
+                    res.transpose()?
+                }}
+            }
+            let top = parse_arg!(top);
+            let left = parse_arg!(left);
+            let right = parse_arg!(right);
+            let bottom = parse_arg!(bottom);
 
             Ok(Args {
-                top, left
+                top, left, bottom, right, forgetful
             })
         })();
 
@@ -55,7 +66,11 @@ impl Args {
         eprintln!("Usage: {program_name} [ARGS]\n\
                 Args:\n\
                 --top: Search start in b\n\
-                --left: Search start in a");
+                --left: Search start in a\n\
+                --bottom: Search end in b\n\
+                --right: Search end in a\n\
+                --forgetful: Use forgetful version of algo"
+                );
         std::process::exit(1);
     }
 }
@@ -93,6 +108,14 @@ struct Grid {
 }
 
 impl Grid {
+    fn x_spacing(&self) -> f32 {
+        self.x_spacing
+    }
+
+    fn y_spacing(&self) -> f32 {
+        self.y_spacing
+    }
+
     fn x_idx_to_pos(&self, idx: usize) -> f32 {
         self.x_start + idx as f32 * self.x_spacing
     }
@@ -115,7 +138,15 @@ impl MyEguiApp {
         // Restore app state using cc.storage (requires the "persistence" feature).
         // Use the cc.gl (a glow::Context) to create graphics shaders and buffers that you can use
         // for e.g. egui::PaintCallback.
-        let mut algo = DiffAlgo::new(a.as_ref(), b.as_ref(), args.top as i64, args.left as i64, 100 * 1024 * 1024).unwrap();
+        let top = args.top.unwrap_or(0) as i64;
+        let left = args.left.unwrap_or(0) as i64;
+        let right = args.right.unwrap_or(a.len()) as i64;
+        let bottom = args.right.unwrap_or(b.len()) as i64;
+        let algo = if args.forgetful {
+            DiffAlgo::new_forgetful(a.as_ref(), b.as_ref(), top, left, bottom, right)
+        } else {
+            DiffAlgo::new(a.as_ref(), b.as_ref(), top, left, bottom, right, 100 * 1024 * 1024).unwrap()
+        };
         MyEguiApp {
             a, b, algo, finished: false,
         }
@@ -224,6 +255,20 @@ impl eframe::App for MyEguiApp {
 
                }
            }
+
+           let left_px = grid.x_idx_to_pos(debug_info.left as usize) - grid.x_spacing() / 2.0;
+           let right_px = grid.x_idx_to_pos(debug_info.right as usize) + grid.x_spacing() / 2.0;
+           let top_px = grid.y_idx_to_pos(debug_info.top as usize) - grid.y_spacing() / 2.0;
+           let bottom_px = grid.y_idx_to_pos(debug_info.bottom as usize) + grid.y_spacing() / 2.0;
+
+           let rect = egui::Rect {
+               min: egui::pos2(left_px, top_px),
+               max: egui::pos2(right_px, bottom_px),
+           };
+           let mut rect_stroke = stroke;
+           rect_stroke.color = Color32::from_rgba_unmultiplied(0, 255, 255, 255);
+
+           painter.rect_stroke(rect, 3.0, rect_stroke)
 
        });
    }
