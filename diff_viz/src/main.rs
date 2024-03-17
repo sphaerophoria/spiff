@@ -2,11 +2,70 @@ use libdiff::{DiffAlgo, DiffAlgoAction, DiffAlgoDebugInfo};
 use eframe::{egui::{self, Galley, Vec2, TextStyle, Painter, Color32, Pos2, Ui}, epaint::Stroke};
 use std::{sync::Arc, rc::Rc, pin::Pin};
 
+struct Args {
+    top: usize,
+    left: usize,
+}
+
+impl Args {
+    fn parse<It: Iterator<Item=String>>(mut it: It) -> Args {
+        let program_name = it.next().unwrap_or_else(|| "diff_viz".to_string());
+
+        let mut top = None;
+        let mut left = None;
+        while let Some(arg) = it.next() {
+            match arg.as_ref() {
+                "--top" => {
+                    top = it.next();
+                }
+                "--left" => {
+                    left = it.next();
+                }
+                "--help" => {
+                    Self::help(&program_name);
+                }
+                e => {
+                    eprintln!("Unexpected argument: {e}");
+                    Self::help(&program_name);
+                }
+            }
+        }
+
+        let res = (|| -> Result<Args, &'static str> {
+            let top = top.unwrap_or_else(|| 0.to_string());
+            let left = left.unwrap_or_else(|| 0.to_string());
+            let top = top.parse().map_err(|_| "top is not a valid usize")?;
+            let left = left.parse().map_err(|_| "top is not a valid usize")?;
+
+            Ok(Args {
+                top, left
+            })
+        })();
+
+        match res {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("{e}");
+                Self::help(&program_name);
+            }
+        }
+    }
+
+    fn help(program_name: &str) -> ! {
+        eprintln!("Usage: {program_name} [ARGS]\n\
+                Args:\n\
+                --top: Search start in b\n\
+                --left: Search start in a");
+        std::process::exit(1);
+    }
+}
+
 fn main() {
+    let args = Args::parse(std::env::args());
     let native_options = eframe::NativeOptions::default();
     let a = Rc::new([1, 2, 3, 4, 5, 6, 7, 8]);
     let b = Rc::new([3, 4, 6, 6, 5, 1, 2, 9]);
-    eframe::run_native("My egui App", native_options, Box::new(|cc| Box::new(MyEguiApp::new(cc, a, b))));
+    eframe::run_native("My egui App", native_options, Box::new(|cc| Box::new(MyEguiApp::new(cc, args, a, b))));
 }
 
 fn lay_out_elems(elems: &[i32], ui: &Ui) -> Vec<Arc<Galley>> {
@@ -51,12 +110,12 @@ struct MyEguiApp {
 }
 
 impl MyEguiApp {
-    fn new(cc: &eframe::CreationContext<'_>, a: Rc<[i32]>, b: Rc<[i32]>) -> Self {
+    fn new(cc: &eframe::CreationContext<'_>, args: Args, a: Rc<[i32]>, b: Rc<[i32]>) -> Self {
         // Customize egui here with cc.egui_ctx.set_fonts and cc.egui_ctx.set_visuals.
         // Restore app state using cc.storage (requires the "persistence" feature).
         // Use the cc.gl (a glow::Context) to create graphics shaders and buffers that you can use
         // for e.g. egui::PaintCallback.
-        let mut algo = DiffAlgo::new(a.as_ref(), b.as_ref(), 100 * 1024 * 1024).unwrap();
+        let mut algo = DiffAlgo::new(a.as_ref(), b.as_ref(), args.top as i64, args.left as i64, 100 * 1024 * 1024).unwrap();
         MyEguiApp {
             a, b, algo, finished: false,
         }

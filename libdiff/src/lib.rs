@@ -215,6 +215,11 @@ pub struct DiffAlgo {
     trace: MyersTrace,
     d: i64,
     k: i64,
+    /// Search begin y
+    top: i64,
+    /// Search begin x
+    left: i64,
+
 }
 
 impl DiffAlgo
@@ -222,6 +227,8 @@ impl DiffAlgo
     pub fn new<U>(
         a: &[U],
         b: &[U],
+        top: i64,
+        left: i64,
         max_memory_bytes: usize,
     ) -> Result<DiffAlgo, OverMemoryLimitError> {
         // Myers diff algorithm, no splitting into smaller segments
@@ -233,11 +240,15 @@ impl DiffAlgo
 
         let max_distance = max_distance as i64;
 
+        assert!(top >= 0);
+        assert!(left >= 0);
         Ok(DiffAlgo {
             max_distance,
             trace,
             d: 0,
             k: -2,
+            top,
+            left,
         })
     }
 
@@ -260,6 +271,8 @@ impl DiffAlgo
     }
 
     pub fn step<U: PartialEq>(&mut self, a: &[U], b: &[U]) -> DiffAlgoAction {
+        let a = &a[self.left as usize..];
+        let b = &b[self.top as usize..];
         self.k += 2;
         if self.k > self.d {
             self.d += 1;
@@ -303,7 +316,8 @@ impl DiffAlgo
             let x = *self.trace.get_mut(self.d, k);
             let y = x - k;
             let backwards_iter = MyersBackwardsIterator::new(self.d, x, y, &mut self.trace);
-            let mut steps_for_k: Vec<(i64, i64)> = backwards_iter.collect();
+            let mut steps_for_k: Vec<(i64, i64)> = backwards_iter.map(|(x, y)| (x + self.left, y + self.top)).collect();
+
             steps_for_k.reverse();
             steps.push(steps_for_k);
         }
@@ -327,7 +341,7 @@ where
     //
     // http://www.xmailserver.org/diff2.pdf
     // https://blog.jcoglan.com/2017/02/12/the-myers-diff-algorithm-part-1/
-    let mut algo = DiffAlgo::new(a, b, max_memory_bytes)?;
+    let mut algo = DiffAlgo::new(a, b, 0, 0, max_memory_bytes)?;
     if algo.max_distance == 0 {
         return Ok(vec![DiffAction::Traverse(Traversal {
             a_idx: 0,
