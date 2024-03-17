@@ -353,6 +353,7 @@ where
     let mut prev_x = last.0;
     let mut prev_y = last.1;
     for (x, y) in it {
+        println!("x: {x}, y: {y}");
         assert!( x >= 0 && y >= 0);
         if prev_y == y {
             builder.push_removal(x as usize);
@@ -363,7 +364,6 @@ where
         }
         prev_x = x;
         prev_y = y;
-
     }
 
     //for d in (0..=shortest_edit_distance).rev() {
@@ -440,6 +440,10 @@ impl Iterator for MyersBackwardsIterator<'_> {
             return None;
         }
 
+        if self.x == 0 && self.y == 0 {
+            return None;
+        }
+
         let k = self.x - self.y;
 
         let prev_k = get_prev_k(self.trace, self.d, k);
@@ -465,7 +469,6 @@ impl Iterator for MyersBackwardsIterator<'_> {
             self.d -= 1;
             self.x = prev_x;
             self.y = prev_y;
-
         }
 
         Some((self.x, self.y))
