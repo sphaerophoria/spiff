@@ -8,6 +8,7 @@ struct Args {
     left: Option<usize>,
     right: Option<usize>,
     forgetful: bool,
+    backwards: bool,
 }
 
 impl Args {
@@ -19,6 +20,7 @@ impl Args {
         let mut left = None;
         let mut right = None;
         let mut forgetful = false;
+        let mut backwards = false;
         while let Some(arg) = it.next() {
             match arg.as_ref() {
                 "--top" => top = it.next(),
@@ -26,6 +28,7 @@ impl Args {
                 "--right" => right = it.next(),
                 "--bottom" => bottom = it.next(),
                 "--forgetful" => forgetful = true,
+                "--backwards" => backwards = true,
                 "--help" => {
                     Self::help(&program_name);
                 }
@@ -48,8 +51,12 @@ impl Args {
             let right = parse_arg!(right);
             let bottom = parse_arg!(bottom);
 
+            if backwards && forgetful {
+                return Err("forgetful cannot be set in backwards mode");
+            }
+
             Ok(Args {
-                top, left, bottom, right, forgetful
+                top, left, bottom, right, forgetful, backwards
             })
         })();
 
@@ -141,8 +148,10 @@ impl MyEguiApp {
         let top = args.top.unwrap_or(0) as i64;
         let left = args.left.unwrap_or(0) as i64;
         let right = args.right.unwrap_or(a.len()) as i64;
-        let bottom = args.right.unwrap_or(b.len()) as i64;
-        let algo = if args.forgetful {
+        let bottom = args.bottom.unwrap_or(b.len()) as i64;
+        let algo = if args.backwards {
+            DiffAlgo::new_backwards(a.as_ref(), b.as_ref(), top, left, bottom, right)
+        } else if args.forgetful {
             DiffAlgo::new_forgetful(a.as_ref(), b.as_ref(), top, left, bottom, right)
         } else {
             DiffAlgo::new(a.as_ref(), b.as_ref(), top, left, bottom, right, 100 * 1024 * 1024).unwrap()
@@ -212,7 +221,7 @@ impl eframe::App for MyEguiApp {
                painter.line_segment([[x, y_start].into(), [x, y_end].into()], stroke);
            }
 
-           let debug_info = self.algo.debug_info();
+           let debug_info = self.algo.debug_info(&self.a, &self.b);
            for y_idx in 0..=self.b.len() {
                for x_idx in 0..=self.a.len() {
                    let last_step = debug_info.steps.last().and_then(|v| v.last());

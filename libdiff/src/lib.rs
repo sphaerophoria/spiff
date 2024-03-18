@@ -266,9 +266,16 @@ pub enum DiffAlgoAction {
     None,
 }
 
+#[derive(Debug, Copy, Clone)]
+enum Direction {
+    Forwards,
+    Backwards,
+}
+
 #[derive(Debug)]
 pub struct DiffAlgo {
     max_distance: i64,
+    direction: Direction,
     trace: AlgoTrace,
     d: i64,
     k: i64,
@@ -295,7 +302,7 @@ impl DiffAlgo
         max_memory_bytes: usize,
     ) -> Result<DiffAlgo, OverMemoryLimitError> {
         let trace = MyersTrace::new(a.len(), b.len(), max_memory_bytes)?;
-        Ok(Self::new_with_trace(a, b, top, left, bottom, right, AlgoTrace::Full(trace)))
+        Ok(Self::new_with_trace(a, b, Direction::Forwards, top, left, bottom, right, AlgoTrace::Full(trace)))
     }
 
     pub fn new_forgetful<U>(
@@ -307,12 +314,25 @@ impl DiffAlgo
         right: i64,
     ) -> DiffAlgo {
         let trace = ForgetfulMyersTrace::new(a.len(), b.len());
-        Self::new_with_trace(a, b, top, left, bottom, right, AlgoTrace::Forgetful(trace))
+        Self::new_with_trace(a, b, Direction::Forwards, top, left, bottom, right, AlgoTrace::Forgetful(trace))
+    }
+
+    pub fn new_backwards<U>(
+        a: &[U],
+        b: &[U],
+        top: i64,
+        left: i64,
+        bottom: i64,
+        right: i64,
+    ) -> DiffAlgo {
+        let trace = MyersTrace::new(a.len(), b.len(), 100 * 1024 * 1024).unwrap();
+        Self::new_with_trace(a, b, Direction::Backwards, top, left, bottom, right, AlgoTrace::Full(trace))
     }
 
     fn new_with_trace<U>(
         a: &[U],
         b: &[U],
+        direction: Direction,
         top: i64,
         left: i64,
         bottom: i64,
@@ -335,6 +355,7 @@ impl DiffAlgo
         assert!(left >= 0);
         DiffAlgo {
             max_distance,
+            direction,
             trace,
             d: 0,
             k: -2,
@@ -384,6 +405,7 @@ impl DiffAlgo
             }
             *self.trace.get_mut(self.d, self.k) = x;
         }
+        println!("d: {}, k: {}, x: {}, y: {}", self.d, self.k, x, y);
         assert!(y >= 0);
 
         while x < a.len() as i64 && y < b.len() as i64 && a[x as usize] == b[y as usize] {
@@ -401,7 +423,7 @@ impl DiffAlgo
         DiffAlgoAction::None
     }
 
-    pub fn debug_info(&mut self) -> DiffAlgoDebugInfo {
+    pub fn debug_info<U>(&mut self, a: &[U], b: &[U]) -> DiffAlgoDebugInfo {
         if self.k < -self.d || self.k > self.d {
             return DiffAlgoDebugInfo {
                 steps: Vec::new(),
@@ -418,18 +440,28 @@ impl DiffAlgo
                 break;
             }
 
-
             let x = *self.trace.get_mut(self.d, k);
             let y = x - k;
+            let local_to_global_xy = |(mut x, mut y)| {
+
+                match self.direction {
+                    Direction::Forwards => (),
+                    Direction::Backwards => {
+                        x = a.len() as i64 - x;
+                        y = b.len() as i64 - y;
+                    }
+                }
+                (x + self.left, y + self.top)
+            };
             // FIXME: 0 is not the d limit
             let mut steps_for_k: Vec<(i64, i64)> = match &mut self.trace {
                 AlgoTrace::Full(trace) => {
-                    let backwards_iter = MyersBackwardsIterator::new(self.d, 0, x, y, trace);
-                    backwards_iter.map(|(x, y)| (x + self.left, y + self.top)).collect()
+                    let backwards_iter = MyersBackwardsIterator::new(self.d, 0, x, y, self.direction, trace);
+                    backwards_iter.map(local_to_global_xy).collect()
                 }
                 AlgoTrace::Forgetful(trace) => {
-                    let backwards_iter = MyersBackwardsIterator::new(self.d, self.d - 1, x, y, trace);
-                    backwards_iter.map(|(x, y)| (x + self.left, y + self.top)).collect()
+                    let backwards_iter = MyersBackwardsIterator::new(self.d, self.d, x, y, self.direction, trace);
+                    backwards_iter.map(local_to_global_xy).collect()
                 }
             };
 
@@ -481,7 +513,7 @@ where
 
     let x = a.len() as i64;
     let y = b.len() as i64;
-    let mut it = MyersBackwardsIterator::new(shortest_edit_distance, 0, x, y, &mut trace);
+    let mut it = MyersBackwardsIterator::new(shortest_edit_distance, 0, x, y, Direction::Forwards, &mut trace);
 
     // FIXME: invalid unwrap?
     let last = it.next().unwrap();
@@ -573,7 +605,7 @@ impl<T: MyersTraceIf> Iterator for MyersBackwardsIterator<'_, T> {
             return Some((self.x, self.y))
         }
 
-        if self.d <= self.d_limit {
+        if self.d < self.d_limit {
             return None;
         }
 
