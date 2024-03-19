@@ -57,7 +57,7 @@ impl DiffBuilder {
     /// Add a traversed item to the diff
     ///
     /// If the last element is already a traversal its length will be amended
-    fn push_traversed_item(&mut self, a_idx: usize, b_idx: usize) {
+    fn push_traversed_item(&mut self, a_idx: usize, b_idx: usize, length: usize) {
         if let Some(DiffAction::Traverse(traversal)) = self.seq.last_mut() {
             if traversal.a_idx == a_idx + 1 && traversal.b_idx == b_idx + 1 {
                 traversal.a_idx -= 1;
@@ -70,7 +70,7 @@ impl DiffBuilder {
         self.seq.push(DiffAction::Traverse(Traversal {
             a_idx,
             b_idx,
-            length: 1,
+            length,
         }));
     }
 
@@ -120,6 +120,14 @@ impl fmt::Display for OverMemoryLimitError {
             "algorithm required {} bytes, which is over the maximum of {} bytes",
             self.required, self.maximum
         )
+    }
+}
+
+fn get_prev_x<T: MyersTrace>(trace: &mut T, prev_d: i64, prev_k: i64) -> i64 {
+    if prev_d < 0 {
+        0
+    } else {
+        *trace.get_mut(prev_d, prev_k)
     }
 }
 
@@ -464,7 +472,7 @@ impl DiffAlgo
                     }
                 }
             };
-            // FIXME: 0 is not the d limit
+
             let mut steps_for_k: Vec<(i64, i64)> = match &mut self.trace {
                 AlgoTrace::Full(trace) => {
                     let backwards_iter = MyersBackwardsIterator::new(self.d, 0, x, y, trace);
@@ -545,7 +553,8 @@ where
         } else if prev_x == x {
             builder.push_insertion(y as usize);
         } else {
-            builder.push_traversed_item(x as usize, y as usize);
+            let length = prev_x -x ;
+            builder.push_traversed_item(x as usize, y as usize, length as usize);
         }
         prev_x = x;
         prev_y = y;
@@ -557,23 +566,41 @@ where
 
 #[derive(Debug)]
 struct MyersBackwardsIterator<'a, T> {
-    first_iter: bool,
     d_limit: i64,
     d: i64,
-    x: i64,
-    y: i64,
+    k: i64,
+    cached_xy: Option<(i64, i64)>,
     trace: &'a mut T
 }
 
 impl<T: MyersTrace> MyersBackwardsIterator<'_, T> {
     fn new(d: i64, d_limit: i64, x: i64, y: i64, trace: &mut T) -> MyersBackwardsIterator<'_, T> {
+        let k = x - y;
         MyersBackwardsIterator {
-            first_iter: true,
             d_limit,
             d,
-            x,
-            y,
+            k,
+            cached_xy: None,
             trace,
+        }
+    }
+
+    fn current_state_diagonal_x_end(&mut self) -> Option<i64> {
+        if self.d == self.d_limit {
+            return None;
+        }
+        // If x distance is 0, or y distance is 0
+        let x = *self.trace.get_mut(self.d, self.k);
+        let prev_k = get_prev_k(self.trace, self.d, self.k);
+        let prev_x = get_prev_x(self.trace, self.d - 1, prev_k);
+        let prev_y = prev_x - prev_k;
+        let y = x - self.k;
+        let x_diff = x - prev_x;
+        let y_diff = y - prev_y;
+        if x_diff == 0 || y_diff == 0 {
+            None
+        } else {
+            Some(prev_x)
         }
     }
 }
@@ -582,48 +609,43 @@ impl<T: MyersTrace> Iterator for MyersBackwardsIterator<'_, T> {
     type Item = (i64, i64);
 
     fn next(&mut self) -> Option<Self::Item> {
-        // FIXME: Surely we can encode this information without this bool
-        if self.first_iter {
-            self.first_iter = false;
-            return Some((self.x, self.y))
+        // Note: Due to the greedy nature of the algorithm. We may get a movement that looks like
+        // the following
+        // o - o
+        //      \
+        //       \
+        //        o
+        //
+        // This needs to be mapped to both a traversal and a deletion, which means we need to
+        // return two line segments. From the perspective of this iterator, this means we need to
+        // return twice for this move. For each d, k if we see a diagnoal, we cache the second move
+        if let Some(ret) = self.cached_xy.take() {
+            return Some(ret);
         }
 
         if self.d < self.d_limit {
             return None;
         }
 
-        if self.x == 0 && self.y == 0 {
-            return None;
-        }
+        let prev_k = get_prev_k(self.trace, self.d, self.k);
 
-        let k = self.x - self.y;
+        let x = *self.trace.get_mut(self.d, self.k);
+        let y = x - self.k;
 
-        let prev_k = get_prev_k(self.trace, self.d, k);
-
-        let prev_x = if self.d == 0 {
-            0
-        } else {
-            *self.trace.get_mut(self.d - 1, prev_k)
-        };
-        // o -- o
-        //       \
-        //        \
-        //         o
+        let prev_x = get_prev_x(self.trace, self.d - 1, prev_k);
         let prev_y = prev_x - prev_k;
 
-        if self.x > prev_x && self.y > prev_y {
-            self.x -= 1;
-            self.y -= 1;
-            if self.y < 0 {
-                self.y = 0
-            };
-        } else {
-            self.d -= 1;
-            self.x = prev_x;
-            self.y = prev_y;
+        let x_diff = x - prev_x;
+        let y_diff = y - prev_y;
+
+        let traversal_diff = x_diff.min(y_diff);
+        if traversal_diff != 0 {
+            self.cached_xy = Some((x - traversal_diff, y - traversal_diff));
         }
 
-        Some((self.x, self.y))
+        self.k = prev_k;
+        self.d -= 1;
+        Some((x, y))
     }
 }
 
