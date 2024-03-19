@@ -388,6 +388,16 @@ impl DiffAlgo
         let a = &a[self.left as usize..self.right as usize];
         let b = &b[self.top as usize..self.bottom as usize];
 
+        let (left, right, top, bottom, a, b) = match self.direction {
+            Direction::Backwards => {
+                (self.top, self.bottom, self.left, self.right, b, a)
+            }
+            Direction::Forwards => {
+                (self.left, self.right, self.top, self.bottom, a, b)
+            }
+        };
+
+
         let mut x;
         let mut y;
         loop {
@@ -400,7 +410,7 @@ impl DiffAlgo
             x = self.x(self.k);
 
             y = x - self.k;
-            if x <= self.right - self.left && y <= self.bottom - self.top {
+            if x <= right - left && y <= bottom - top {
                 break;
             }
             *self.trace.get_mut(self.d, self.k) = x;
@@ -408,7 +418,7 @@ impl DiffAlgo
         println!("d: {}, k: {}, x: {}, y: {}", self.d, self.k, x, y);
         assert!(y >= 0);
 
-        while x < a.len() as i64 && y < b.len() as i64 && a[x as usize] == b[y as usize] {
+        while x < a.len() as i64 && y < b.len() as i64 && extract_from_source(x, a, self.direction) == extract_from_source(y, b, self.direction) {
             x += 1;
             y += 1;
         }
@@ -443,24 +453,25 @@ impl DiffAlgo
             let x = *self.trace.get_mut(self.d, k);
             let y = x - k;
             let local_to_global_xy = |(mut x, mut y)| {
-
                 match self.direction {
-                    Direction::Forwards => (),
+                    Direction::Forwards => {
+                        (x + self.left, y + self.top)
+                    }
                     Direction::Backwards => {
-                        x = a.len() as i64 - x;
-                        y = b.len() as i64 - y;
+                        x = self.bottom - x;
+                        y = self.right - y;
+                        (y, x)
                     }
                 }
-                (x + self.left, y + self.top)
             };
             // FIXME: 0 is not the d limit
             let mut steps_for_k: Vec<(i64, i64)> = match &mut self.trace {
                 AlgoTrace::Full(trace) => {
-                    let backwards_iter = MyersBackwardsIterator::new(self.d, 0, x, y, self.direction, trace);
+                    let backwards_iter = MyersBackwardsIterator::new(self.d, 0, x, y, trace);
                     backwards_iter.map(local_to_global_xy).collect()
                 }
                 AlgoTrace::Forgetful(trace) => {
-                    let backwards_iter = MyersBackwardsIterator::new(self.d, self.d, x, y, self.direction, trace);
+                    let backwards_iter = MyersBackwardsIterator::new(self.d, self.d, x, y, trace);
                     backwards_iter.map(local_to_global_xy).collect()
                 }
             };
@@ -476,6 +487,13 @@ impl DiffAlgo
             right: self.right,
             bottom: self.bottom,
         }
+    }
+}
+
+fn extract_from_source<U>(pos: i64, source: &[U], direction: Direction) -> &U {
+    match direction {
+        Direction::Forwards => &source[pos as usize],
+        Direction::Backwards => &source[source.len() - pos as usize - 1],
     }
 }
 
@@ -513,7 +531,7 @@ where
 
     let x = a.len() as i64;
     let y = b.len() as i64;
-    let mut it = MyersBackwardsIterator::new(shortest_edit_distance, 0, x, y, Direction::Forwards, &mut trace);
+    let mut it = MyersBackwardsIterator::new(shortest_edit_distance, 0, x, y, &mut trace);
 
     // FIXME: invalid unwrap?
     let last = it.next().unwrap();

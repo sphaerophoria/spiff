@@ -3,6 +3,8 @@ use eframe::{egui::{self, Galley, Vec2, TextStyle, Painter, Color32, Pos2, Ui}, 
 use std::{sync::Arc, rc::Rc, pin::Pin};
 
 struct Args {
+    a: Vec<i32>,
+    b: Vec<i32>,
     top: Option<usize>,
     bottom: Option<usize>,
     left: Option<usize>,
@@ -13,6 +15,7 @@ struct Args {
 
 impl Args {
     fn parse<It: Iterator<Item=String>>(mut it: It) -> Args {
+        let mut it = it.peekable();
         let program_name = it.next().unwrap_or_else(|| "diff_viz".to_string());
 
         let mut top = None;
@@ -21,8 +24,23 @@ impl Args {
         let mut right = None;
         let mut forgetful = false;
         let mut backwards = false;
+        let mut a = Vec::new();
+        let mut b = Vec::new();
+
+        let parse_i32_arg_list = |output: &mut Vec<i32>, it: &mut std::iter::Peekable<It>| {
+            while let Some(v) = it.peek().and_then(|x| x.parse::<i32>().ok()) {
+                it.next();
+                output.push(v)
+            }
+        };
         while let Some(arg) = it.next() {
             match arg.as_ref() {
+                "--a" => {
+                    parse_i32_arg_list(&mut a, &mut it);
+                }
+                "--b" => {
+                    parse_i32_arg_list(&mut b, &mut it);
+                }
                 "--top" => top = it.next(),
                 "--left" => left = it.next(),
                 "--right" => right = it.next(),
@@ -56,7 +74,7 @@ impl Args {
             }
 
             Ok(Args {
-                top, left, bottom, right, forgetful, backwards
+                top, left, bottom, right, forgetful, backwards, a, b,
             })
         })();
 
@@ -85,9 +103,7 @@ impl Args {
 fn main() {
     let args = Args::parse(std::env::args());
     let native_options = eframe::NativeOptions::default();
-    let a = Rc::new([1, 2, 3, 4, 5, 6, 7, 8]);
-    let b = Rc::new([3, 4, 6, 6, 5, 1, 2, 9]);
-    eframe::run_native("My egui App", native_options, Box::new(|cc| Box::new(MyEguiApp::new(cc, args, a, b))));
+    eframe::run_native("My egui App", native_options, Box::new(|cc| Box::new(MyEguiApp::new(cc, args))));
 }
 
 fn lay_out_elems(elems: &[i32], ui: &Ui) -> Vec<Arc<Galley>> {
@@ -133,18 +149,20 @@ impl Grid {
 }
 
 struct MyEguiApp {
-    a: Rc<[i32]>,
-    b: Rc<[i32]>,
+    a: Vec<i32>,
+    b: Vec<i32>,
     algo: DiffAlgo,
     finished: bool,
 }
 
 impl MyEguiApp {
-    fn new(cc: &eframe::CreationContext<'_>, args: Args, a: Rc<[i32]>, b: Rc<[i32]>) -> Self {
+    fn new(cc: &eframe::CreationContext<'_>, args: Args) -> Self {
         // Customize egui here with cc.egui_ctx.set_fonts and cc.egui_ctx.set_visuals.
         // Restore app state using cc.storage (requires the "persistence" feature).
         // Use the cc.gl (a glow::Context) to create graphics shaders and buffers that you can use
         // for e.g. egui::PaintCallback.
+        let a = args.a;
+        let b = args.b;
         let top = args.top.unwrap_or(0) as i64;
         let left = args.left.unwrap_or(0) as i64;
         let right = args.right.unwrap_or(a.len()) as i64;
