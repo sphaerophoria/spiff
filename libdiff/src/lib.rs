@@ -188,6 +188,7 @@ fn calc_x_without_diagonal<T: MyersTrace>(trace: &mut T, d: i64, k: i64) -> i64 
     }
 }
 
+
 pub trait MyersTrace {
     fn get_mut(&mut self, d: i64, k: i64) -> &mut i64;
 }
@@ -298,7 +299,7 @@ impl MyersTrace for AlgoTrace {
 }
 
 /// Snapshot of the DiffAlgo state. Useful for debugging/visualization
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct DiffAlgoDebugInfo {
     // steps[k][line_segment]
     pub steps: Vec<Vec<(i64, i64)>>,
@@ -310,15 +311,154 @@ pub struct DiffAlgoDebugInfo {
 }
 
 #[derive(PartialEq)]
-pub enum DiffAlgoState {
+pub enum DiffAlgoActionTaken {
     Finished,
-    InProgress,
+    KIncremented,
+    DIncremented,
 }
 
 #[derive(Debug, Copy, Clone)]
 enum AlgoWalkDirection {
     Forwards,
     Backwards,
+}
+
+// Step 1: Forgetful, and find intersection points
+// Step 2: Build diff based off sub-problems
+
+pub struct LinearAlgoDebugInfo {
+    pub infos: Vec<DiffAlgoDebugInfo>,
+    pub meeting_point: Option<(i64, i64)>,
+}
+
+enum SnakingStateResponse {
+    Finished((i64, i64)),
+    None,
+}
+
+struct SnakingState {
+    forwards: DiffAlgo,
+    backwards: DiffAlgo,
+    k_offset: i64,
+}
+
+impl SnakingState {
+    // FIXME: Bool return maybe not the best
+    pub fn step<U: PartialEq>(&mut self, a: &[U], b: &[U]) -> SnakingStateResponse {
+        while self.forwards.step(a, b) == DiffAlgoActionTaken::KIncremented {};
+        while self.backwards.step(a, b) == DiffAlgoActionTaken::KIncremented {};
+
+        debug_assert!(self.forwards.d == self.backwards.d);
+
+        for k in (-self.forwards.d..=self.forwards.d).step_by(2) {
+            let forwards_x_val = *self.forwards.trace.get_mut(self.forwards.d, k);
+            let backwards_k = k - self.k_offset;
+
+            if backwards_k < -self.backwards.d || backwards_k > self.backwards.d {
+                continue;
+            }
+            let backwards_x_val = *self.backwards.trace.get_mut(self.forwards.d, backwards_k);
+            let backwards_x_val = backwards_x_val - backwards_k;
+            let backwards_x_val = self.backwards.right - backwards_x_val;
+
+            if forwards_x_val >= backwards_x_val  {
+                return SnakingStateResponse::Finished((forwards_x_val, forwards_x_val - k));
+            }
+
+        }
+        SnakingStateResponse::None
+    }
+}
+
+enum LinearAlgoState {
+    Snaking(SnakingState),
+    // FIXME: Backtracking and building diff sound like a very similar concept
+    Backtracking {
+        algos: Vec<DiffAlgo>,
+        current_idx: usize,
+    },
+}
+
+// FIXME: Myabe merge with DiffAlgo
+pub struct LinearDiffAlgo {
+    inner: LinearAlgoState,
+}
+
+impl LinearDiffAlgo {
+    pub fn new<U>(
+        a: &[U],
+        b: &[U],
+        top: i64,
+        left: i64,
+        bottom: i64,
+        right: i64,
+        max_memory_bytes: usize) -> LinearDiffAlgo {
+        // FIXME: These should be forgetful
+        let forwards = DiffAlgo::new(a, b, top, left, bottom, right, max_memory_bytes).unwrap();
+        let backwards = DiffAlgo::new_backwards(a, b, top, left, bottom, right);
+
+        let a_len: i64 = a.len().try_into().unwrap();
+        let b_len: i64 = b.len().try_into().unwrap();
+        let k_offset = a_len - b_len;
+
+        LinearDiffAlgo {
+            inner: LinearAlgoState::Snaking(SnakingState {
+                forwards,
+                backwards,
+                k_offset,
+            }),
+        }
+
+    }
+
+    pub fn step<U: PartialEq>(&mut self, a: &[U], b: &[U]) -> bool {
+        match &mut self.inner {
+            LinearAlgoState::Snaking(snaking_state) => {
+                if let SnakingStateResponse::Finished((x, y)) = snaking_state.step(a, b) {
+                    // FIXME: max mem should be propagated
+                    let algos = vec![
+                        DiffAlgo::new(a, b, 0, 0, y, x, 100 * 1024 * 1024).unwrap(),
+                        // FIXME: casting is sketchy
+                        DiffAlgo::new(a, b, y, x, b.len() as i64, a.len() as i64, 100 * 1024 * 1024).unwrap(),
+                    ];
+                    self.inner = LinearAlgoState::Backtracking {
+                        algos,
+                        current_idx: 0,
+                    };
+                }
+                false
+            }
+            LinearAlgoState::Backtracking { algos, current_idx }  => {
+                if *current_idx >= algos.len() {
+                    return true
+                }
+
+                if algos[*current_idx].step(a, b) == DiffAlgoActionTaken::Finished {
+                    *current_idx += 1;
+                }
+                false
+            }
+        }
+    }
+
+    pub fn debug_info(&mut self) -> LinearAlgoDebugInfo {
+        match &mut self.inner {
+            LinearAlgoState::Snaking(snaking_state) => {
+                LinearAlgoDebugInfo {
+                    infos: vec![snaking_state.forwards.debug_info(), snaking_state.backwards.debug_info()],
+                    meeting_point: None,
+                }
+            }
+            LinearAlgoState::Backtracking { algos, .. } => {
+                LinearAlgoDebugInfo {
+                    infos: algos.iter_mut().map(|x| x.debug_info()).collect(),
+                    // FIXME: multiple meeting points
+                    meeting_point: Some((algos[0].right, algos[0].bottom)),
+                }
+            }
+
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -434,7 +574,8 @@ impl DiffAlgo {
         }
     }
 
-    pub fn step<U: PartialEq>(&mut self, a: &[U], b: &[U]) -> DiffAlgoState {
+    pub fn step<U: PartialEq>(&mut self, a: &[U], b: &[U]) -> DiffAlgoActionTaken {
+        println!("step: {}, {}", self.d, self.k);
         let a = &a[self.left as usize..self.right as usize];
         let b = &b[self.top as usize..self.bottom as usize];
 
@@ -490,10 +631,16 @@ impl DiffAlgo {
         *self.trace.get_mut(self.d, self.k) = x;
 
         if x >= a.len() as i64 && y >= b.len() as i64 {
-            return DiffAlgoState::Finished;
+            return DiffAlgoActionTaken::Finished;
+        } else if self.k >= self.d {
+            // NOTE: This is technically a lie, but in order for debug info to provide useful
+            // information about what we just did, this lie is useful to us. From the callers
+            // perspective they don't care if we increment at the end of this iteration or the
+            // start of the next
+            return DiffAlgoActionTaken::DIncremented;
         }
 
-        DiffAlgoState::InProgress
+        DiffAlgoActionTaken::KIncremented
     }
 
     pub fn debug_info(&mut self) -> DiffAlgoDebugInfo {
@@ -556,8 +703,50 @@ fn extract_from_source<U>(pos: i64, source: &[U], direction: AlgoWalkDirection) 
     }
 }
 
+pub fn diff<U: PartialEq>(
+    a: &[U],
+    b: &[U],
+    max_memory_bytes: usize,
+) -> Result<Vec<DiffAction>, OverMemoryLimitError> {
+    let mut algo = LinearDiffAlgo::new(a, b, 0, 0, b.len() as i64, a.len() as i64, max_memory_bytes);
+    while !algo.step(a, b) {}
+
+    let mut builder = DiffBuilder::default();
+    // FIXME: What the fuck abstraction violation
+    let LinearAlgoState::Backtracking { algos, .. } = algo.inner else {
+        panic!("algo is not complete");
+    };
+
+    let mut prev_x = a.len() as i64;
+    let mut prev_y = b.len() as i64;
+    for mut algo in algos.into_iter().rev() {
+        let backwards_iter = MyersBackwardsIterator::new(algo.d, 0, algo.right, algo.bottom, &mut algo.trace).map(|(x, y)| (x + algo.left, y + algo.top));
+        for (x, y) in backwards_iter {
+            if x == prev_x && y == prev_y {
+                continue;
+            }
+            assert!(x >= 0 && y >= 0);
+            if prev_y == y {
+                builder.push_removal(x as usize);
+            } else if prev_x == x {
+                builder.push_insertion(y as usize);
+            } else {
+                let length = prev_x - x;
+                builder.push_traversed_item(x as usize, y as usize, length as usize);
+            }
+            prev_x = x;
+            prev_y = y;
+        }
+
+    }
+
+    builder.seq.reverse();
+    Ok(builder.seq)
+}
+
+
 /// Find a sequence of actions that applied to a results in b
-pub fn diff<U>(
+pub fn diff_old<U>(
     a: &[U],
     b: &[U],
     max_memory_bytes: usize,
@@ -578,7 +767,7 @@ where
         })]);
     }
 
-    while algo.step(a, b) != DiffAlgoState::Finished {}
+    while algo.step(a, b) != DiffAlgoActionTaken::Finished {}
 
     let shortest_edit_distance = algo.d;
     let trace = algo.trace;
@@ -626,6 +815,7 @@ struct MyersBackwardsIterator<'a, T> {
 impl<T: MyersTrace> MyersBackwardsIterator<'_, T> {
     fn new(d: i64, d_limit: i64, x: i64, y: i64, trace: &mut T) -> MyersBackwardsIterator<'_, T> {
         let k = x - y;
+        println!("new myers backwards: d: {d}, k: {k}");
         MyersBackwardsIterator {
             d_limit,
             d,
@@ -658,6 +848,7 @@ impl<T: MyersTrace> Iterator for MyersBackwardsIterator<'_, T> {
             return None;
         }
 
+        println!("getting move source for {}, {}", self.d, self.k);
         let move_source = get_move_source(self.trace, self.d, self.k);
 
         let x = *self.trace.get_mut(self.d, self.k);

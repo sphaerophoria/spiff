@@ -2,7 +2,7 @@ use eframe::{
     egui::{self, Color32, Galley, Painter, Pos2, Rect, TextStyle, Ui},
     epaint::Stroke,
 };
-use libdiff::{DiffAlgo, DiffAlgoDebugInfo, DiffAlgoState};
+use libdiff::{LinearDiffAlgo, DiffAlgo, DiffAlgoDebugInfo, DiffAlgoActionTaken};
 use std::sync::Arc;
 
 struct Args {
@@ -12,6 +12,7 @@ struct Args {
     bottom: Option<usize>,
     left: Option<usize>,
     right: Option<usize>,
+    linear: bool,
     forgetful: bool,
     backwards: bool,
 }
@@ -27,6 +28,7 @@ impl Args {
         let mut right = None;
         let mut forgetful = false;
         let mut backwards = false;
+        let mut linear = false;
         let mut a = Vec::new();
         let mut b = Vec::new();
 
@@ -51,6 +53,7 @@ impl Args {
                 "--bottom" => bottom = it.next(),
                 "--forgetful" => forgetful = true,
                 "--backwards" => backwards = true,
+                "--linear" => linear = true,
                 "--help" => {
                     Self::help(&program_name);
                 }
@@ -80,6 +83,10 @@ impl Args {
                 return Err("forgetful cannot be set in backwards mode");
             }
 
+            if linear && (backwards || forgetful) {
+                return Err("no --backwards or --forgetful with --linear");
+            }
+
             Ok(Args {
                 top,
                 left,
@@ -87,6 +94,7 @@ impl Args {
                 right,
                 forgetful,
                 backwards,
+                linear,
                 a,
                 b,
             })
@@ -145,27 +153,38 @@ fn draw_elem_at_pos(elem: &Arc<Galley>, pos: Pos2, painter: &Painter) {
     painter.galley(pos, Arc::clone(elem), Color32::WHITE);
 }
 
-fn construct_diff_algo(args: &Args) -> DiffAlgo {
+// FIXME: Awful name
+enum GuiDiffAlgo {
+    Linear(LinearDiffAlgo),
+    Full(DiffAlgo),
+}
+
+fn construct_diff_algo(args: &Args) -> GuiDiffAlgo {
     let top = args.top.unwrap_or(0) as i64;
     let left = args.left.unwrap_or(0) as i64;
     let right = args.right.unwrap_or(args.a.len()) as i64;
     let bottom = args.bottom.unwrap_or(args.b.len()) as i64;
 
-    if args.backwards {
-        DiffAlgo::new_backwards(args.a.as_ref(), args.b.as_ref(), top, left, bottom, right)
+    const MAX_MEM_BYTES: usize = 100 * 1024 * 1024; // 100MB
+
+    if args.linear {
+        GuiDiffAlgo::Linear(LinearDiffAlgo::new(args.a.as_ref(), args.b.as_ref(), top, left, bottom, right, MAX_MEM_BYTES))
+    }
+    else if args.backwards {
+        GuiDiffAlgo::Full(DiffAlgo::new_backwards(args.a.as_ref(), args.b.as_ref(), top, left, bottom, right))
     } else if args.forgetful {
-        DiffAlgo::new_forgetful(args.a.as_ref(), args.b.as_ref(), top, left, bottom, right)
+        GuiDiffAlgo::Full(DiffAlgo::new_forgetful(args.a.as_ref(), args.b.as_ref(), top, left, bottom, right))
     } else {
-        DiffAlgo::new(
+        GuiDiffAlgo::Full(DiffAlgo::new(
             args.a.as_ref(),
             args.b.as_ref(),
             top,
             left,
             bottom,
             right,
-            100 * 1024 * 1024,
+            MAX_MEM_BYTES
         )
-        .unwrap()
+        .unwrap())
     }
 }
 
@@ -199,9 +218,9 @@ fn draw_grid_lines(width: usize, height: usize, grid: &Grid, painter: &Painter, 
         painter.line_segment([[x_start, y].into(), [x_end, y].into()], stroke);
     }
 
-    for x_idx in 0..=height {
+    for x_idx in 0..=width {
         let y_start = grid.y_idx_to_pos(0);
-        let y_end = grid.y_idx_to_pos(width);
+        let y_end = grid.y_idx_to_pos(height);
         let x = grid.x_idx_to_pos(x_idx);
         painter.line_segment([[x, y_start].into(), [x, y_end].into()], stroke);
     }
@@ -263,14 +282,12 @@ fn draw_active_paths(
             let line_start_y = grid.y_idx_to_pos(step[0].1 as usize);
             let line_end_x = grid.x_idx_to_pos(step[1].0 as usize);
             let line_end_y = grid.y_idx_to_pos(step[1].1 as usize);
-            let mut move_stroke = stroke;
-            move_stroke.color = Color32::GREEN;
             painter.line_segment(
                 [
                     [line_start_x, line_start_y].into(),
                     [line_end_x, line_end_y].into(),
                 ],
-                move_stroke,
+                stroke,
             );
         }
     }
@@ -293,6 +310,18 @@ fn draw_bounding_rect(
     };
 
     painter.rect_stroke(rect, 3.0, stroke);
+}
+
+fn render_algo_state(grid: &Grid, debug_info: &DiffAlgoDebugInfo, stroke: Stroke, painter: &Painter, active_color: Color32) {
+    draw_active_dot(grid, debug_info, painter, active_color);
+
+    let mut move_stroke = stroke;
+    move_stroke.color = active_color;
+    draw_active_paths(grid, debug_info, painter, move_stroke);
+
+    let mut rect_stroke = stroke;
+    rect_stroke.color = Color32::from_rgba_unmultiplied(0, 255, 255, 255);
+    draw_bounding_rect(grid, debug_info, painter, rect_stroke);
 }
 
 struct Grid {
@@ -335,7 +364,7 @@ impl Grid {
 struct DiffViz {
     a: Vec<i32>,
     b: Vec<i32>,
-    algo: DiffAlgo,
+    algo: GuiDiffAlgo,
     finished: bool,
 }
 
@@ -354,11 +383,19 @@ impl DiffViz {
 impl eframe::App for DiffViz {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::CentralPanel::default().show(ctx, |ui| {
-            if ui.button("next").clicked()
-                && !self.finished
-                && self.algo.step(self.a.as_ref(), self.b.as_ref()) == DiffAlgoState::Finished
-            {
-                self.finished = true;
+            if ui.button("next").clicked() && !self.finished {
+                match &mut self.algo {
+                    GuiDiffAlgo::Full(algo) => {
+                        if algo.step(&self.a, &self.b) == DiffAlgoActionTaken::Finished {
+                            self.finished = true;
+                        }
+                    }
+                    GuiDiffAlgo::Linear(x) => {
+                        if x.step(&self.a, &self.b) {
+                            self.finished = true;
+                        }
+                    }
+                }
             }
 
             let available_size = ui.available_size();
@@ -374,17 +411,31 @@ impl eframe::App for DiffViz {
             draw_grid_lines(self.a.len(), self.b.len(), &grid, painter, stroke);
             draw_diagonals(&grid, &self.a, &self.b, painter, stroke);
 
-            let debug_info = self.algo.debug_info();
             draw_dots(&grid, self.a.len(), self.b.len(), painter, color);
-            draw_active_dot(&grid, &debug_info, painter, Color32::GREEN);
 
-            let mut move_stroke = stroke;
-            move_stroke.color = Color32::GREEN;
-            draw_active_paths(&grid, &debug_info, painter, move_stroke);
-
-            let mut rect_stroke = stroke;
-            rect_stroke.color = Color32::from_rgba_unmultiplied(0, 255, 255, 255);
-            draw_bounding_rect(&grid, &debug_info, painter, rect_stroke);
+            match &mut self.algo {
+                GuiDiffAlgo::Full(algo) => {
+                    render_algo_state(&grid, &algo.debug_info(), stroke, painter, Color32::GREEN);
+                }
+                GuiDiffAlgo::Linear(algo) => {
+                    let debug_info = algo.debug_info();
+                    let colors = [
+                        Color32::GREEN,
+                        Color32::YELLOW,
+                        Color32::from_rgba_unmultiplied(255, 128, 0, 255),
+                    ];
+                    for (info, color) in debug_info.infos.iter().zip(colors.iter().cycle()) {
+                        render_algo_state(&grid, info, stroke, painter, *color);
+                    }
+                    if let Some(meeting_point) = debug_info.meeting_point {
+                        if meeting_point.0 >= 0 && meeting_point.1 >= 0 {
+                            let x_pos = grid.x_idx_to_pos(meeting_point.0 as usize);
+                            let y_pos = grid.y_idx_to_pos(meeting_point.1 as usize);
+                            painter.circle_filled(egui::pos2(x_pos, y_pos), CIRCLE_RADIUS, Color32::from_rgba_unmultiplied(255, 0, 255, 255));
+                        }
+                    }
+                }
+            }
         });
     }
 }

@@ -188,7 +188,7 @@ impl<'a> DiffCollectionProcessor<'a> {
         }
 
         let all_diffs_generated = self.diffs.iter().all(|v| v.is_ok());
-        (self.diffs, self.matches) = if self.options.track_moves && all_diffs_generated {
+        (self.diffs, self.matches) = if self.options.track_moves && all_diffs_generated && false{
             let num_diffs = self.diffs.len();
             let mut diffs = Vec::new();
             std::mem::swap(&mut diffs, &mut self.diffs);
