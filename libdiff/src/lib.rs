@@ -123,29 +123,68 @@ impl fmt::Display for OverMemoryLimitError {
     }
 }
 
-fn get_prev_x<T: MyersTrace>(trace: &mut T, prev_d: i64, prev_k: i64) -> i64 {
-    if prev_d < 0 {
-        0
-    } else {
-        *trace.get_mut(prev_d, prev_k)
-    }
+enum MoveSourceDirection {
+    Root,
+    Left,
+    Up,
 }
 
-fn get_prev_k<T: MyersTrace>(trace: &mut T, d: i64, k: i64) -> i64 {
-    if d == 0 {
-        0
+struct MoveSource {
+    d: i64,
+    k: i64,
+    direction: MoveSourceDirection,
+}
+
+/// How did we get to a given d, k position? Assumes that trace has been populated for 0..d
+fn get_move_source<T: MyersTrace>(trace: &mut T, d: i64, k: i64) -> MoveSource {
+    let direction = if d == 0 {
+        MoveSourceDirection::Root
     } else if k == -d {
-        k + 1
+        MoveSourceDirection::Up
     } else if k == d {
-        k - 1
+        MoveSourceDirection::Left
     } else {
         let left = *trace.get_mut(d - 1, k - 1);
         let right = *trace.get_mut(d - 1, k + 1);
         if left < right {
-            k + 1
+            MoveSourceDirection::Up
         } else {
-            k - 1
+            MoveSourceDirection::Left
         }
+    };
+
+    let prev_k = match direction {
+        MoveSourceDirection::Root => 0,
+        MoveSourceDirection::Up => k + 1,
+        MoveSourceDirection::Left => k - 1,
+    };
+
+    MoveSource {
+        d: d - 1,
+        k: prev_k,
+        direction,
+    }
+}
+
+/// Extract the x value associated with a given d, k from the trace. This handles the edge case
+/// where we are at the trace root and the previous d value is invalid
+fn resolve_x_for_d_k<T: MyersTrace>(trace: &mut T, d: i64, k: i64) -> i64 {
+    if d < 0 {
+        0
+    } else {
+        *trace.get_mut(d, k)
+    }
+}
+
+/// Calculate the x position for a given d, k without advancing through the next diagonal. Assumes
+/// that previous d/k positions have already been walked
+fn calc_x_without_diagonal<T: MyersTrace>(trace: &mut T, d: i64, k: i64) -> i64 {
+    let move_source = get_move_source(trace, d, k);
+    let prev_x = resolve_x_for_d_k(trace, move_source.d, move_source.k);
+    match move_source.direction {
+        MoveSourceDirection::Root => 0,
+        MoveSourceDirection::Up => prev_x,
+        MoveSourceDirection::Left => prev_x + 1,
     }
 }
 
@@ -153,6 +192,7 @@ pub trait MyersTrace {
     fn get_mut(&mut self, d: i64, k: i64) -> &mut i64;
 }
 
+/// Myers trace with information required to walk all the way back to the root
 #[derive(Debug)]
 pub struct FullMyersTrace {
     data: Box<[i64]>,
@@ -211,6 +251,8 @@ impl MyersTrace for FullMyersTrace {
     }
 }
 
+/// Myers trace that can only remember enough data to continue the walk. Backtracking will not
+/// work.
 #[derive(Debug)]
 pub struct ForgetfulMyersTrace {
     data: Box<[i64]>,
@@ -239,13 +281,14 @@ impl MyersTrace for ForgetfulMyersTrace {
     }
 }
 
+/// Wrapper around other MyersTrace implementations
 #[derive(Debug)]
 enum AlgoTrace {
     Full(FullMyersTrace),
     Forgetful(ForgetfulMyersTrace),
 }
 
-impl AlgoTrace {
+impl MyersTrace for AlgoTrace {
     fn get_mut(&mut self, d: i64, k: i64) -> &mut i64 {
         match self {
             AlgoTrace::Full(x) => x.get_mut(d, k),
@@ -254,6 +297,7 @@ impl AlgoTrace {
     }
 }
 
+/// Snapshot of the DiffAlgo state. Useful for debugging/visualization
 #[derive(Debug)]
 pub struct DiffAlgoDebugInfo {
     // steps[k][line_segment]
@@ -266,9 +310,9 @@ pub struct DiffAlgoDebugInfo {
 }
 
 #[derive(PartialEq)]
-pub enum DiffAlgoAction {
-    Finish,
-    None,
+pub enum DiffAlgoState {
+    Finished,
+    InProgress,
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -390,25 +434,7 @@ impl DiffAlgo {
         }
     }
 
-    pub fn get_x(&mut self) -> i64 {
-        if self.d == 0 {
-            0
-        } else if self.k == -self.d {
-            *self.trace.get_mut(self.d - 1, self.k + 1)
-        } else if self.k == self.d {
-            *self.trace.get_mut(self.d - 1, self.k - 1) + 1
-        } else {
-            let left = *self.trace.get_mut(self.d - 1, self.k - 1);
-            let right = *self.trace.get_mut(self.d - 1, self.k + 1);
-            if left < right {
-                right
-            } else {
-                left + 1
-            }
-        }
-    }
-
-    pub fn step<U: PartialEq>(&mut self, a: &[U], b: &[U]) -> DiffAlgoAction {
+    pub fn step<U: PartialEq>(&mut self, a: &[U], b: &[U]) -> DiffAlgoState {
         let a = &a[self.left as usize..self.right as usize];
         let b = &b[self.top as usize..self.bottom as usize];
 
@@ -426,18 +452,28 @@ impl DiffAlgo {
         let mut x;
         let mut y;
         loop {
+            // Each level of the algorithm only works on odd or even values of k, see original
+            // paper
             self.k += 2;
+
+            // Translation of outer loop. If we hit the limit of k d has to be increased by 1, and
+            // k has to be reset
             if self.k > self.d {
                 self.d += 1;
                 self.k = -self.d;
             }
 
-            x = self.get_x();
-
+            x = calc_x_without_diagonal(&mut self.trace, self.d, self.k);
             y = x - self.k;
+
             if x <= right - left && y <= bottom - top {
                 break;
             }
+
+            // If we have passed the above condition, we are outside the region of interest.
+            // However we still need to mark this location in the trace as the next stage of the
+            // algorithm will try to read from it. No need to advance diagonals though, and no need
+            // to pause the algorithm here
             *self.trace.get_mut(self.d, self.k) = x;
         }
         assert!(y >= 0);
@@ -454,10 +490,10 @@ impl DiffAlgo {
         *self.trace.get_mut(self.d, self.k) = x;
 
         if x >= a.len() as i64 && y >= b.len() as i64 {
-            return DiffAlgoAction::Finish;
+            return DiffAlgoState::Finished;
         }
 
-        DiffAlgoAction::None
+        DiffAlgoState::InProgress
     }
 
     pub fn debug_info(&mut self) -> DiffAlgoDebugInfo {
@@ -542,7 +578,7 @@ where
         })]);
     }
 
-    while algo.step(a, b) != DiffAlgoAction::Finish {}
+    while algo.step(a, b) != DiffAlgoState::Finished {}
 
     let shortest_edit_distance = algo.d;
     let trace = algo.trace;
@@ -622,13 +658,13 @@ impl<T: MyersTrace> Iterator for MyersBackwardsIterator<'_, T> {
             return None;
         }
 
-        let prev_k = get_prev_k(self.trace, self.d, self.k);
+        let move_source = get_move_source(self.trace, self.d, self.k);
 
         let x = *self.trace.get_mut(self.d, self.k);
         let y = x - self.k;
 
-        let prev_x = get_prev_x(self.trace, self.d - 1, prev_k);
-        let prev_y = prev_x - prev_k;
+        let prev_x = resolve_x_for_d_k(self.trace, move_source.d, move_source.k);
+        let prev_y = prev_x - move_source.k;
 
         let x_diff = x - prev_x;
         let y_diff = y - prev_y;
@@ -640,7 +676,7 @@ impl<T: MyersTrace> Iterator for MyersBackwardsIterator<'_, T> {
             self.cached_xy = Some((x - traversal_diff, y - traversal_diff));
         }
 
-        self.k = prev_k;
+        self.k = move_source.k;
         self.d -= 1;
         Some((x, y))
     }

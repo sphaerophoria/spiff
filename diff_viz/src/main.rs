@@ -1,8 +1,8 @@
 use eframe::{
-    egui::{self, Color32, Galley, Painter, Pos2, TextStyle, Ui, Rect},
+    egui::{self, Color32, Galley, Painter, Pos2, Rect, TextStyle, Ui},
     epaint::Stroke,
 };
-use libdiff::{DiffAlgo, DiffAlgoAction, DiffAlgoDebugInfo};
+use libdiff::{DiffAlgo, DiffAlgoDebugInfo, DiffAlgoState};
 use std::sync::Arc;
 
 struct Args {
@@ -189,7 +189,6 @@ fn draw_headers(a: &[i32], b: &[i32], grid: &Grid, ui: &Ui) {
     for (idx, elem) in b_laid_out.iter().enumerate() {
         draw_elem_at_pos(elem, egui::pos2(10.0, grid.y_idx_to_pos(idx + 1)), painter);
     }
-
 }
 
 fn draw_grid_lines(width: usize, height: usize, grid: &Grid, painter: &Painter, stroke: Stroke) {
@@ -214,14 +213,10 @@ fn draw_diagonals(grid: &Grid, a: &[i32], b: &[i32], painter: &Painter, stroke: 
             let x_pos = grid.x_idx_to_pos(x_idx);
             let y_pos = grid.y_idx_to_pos(y_idx);
 
-            if y_idx < b.len()
-                && x_idx < a.len()
-                && b.get(y_idx) == a.get(x_idx)
-            {
+            if y_idx < b.len() && x_idx < a.len() && b.get(y_idx) == a.get(x_idx) {
                 let x_end = grid.x_idx_to_pos(x_idx + 1);
                 let y_end = grid.y_idx_to_pos(y_idx + 1);
-                painter
-                    .line_segment([[x_pos, y_pos].into(), [x_end, y_end].into()], stroke);
+                painter.line_segment([[x_pos, y_pos].into(), [x_end, y_end].into()], stroke);
             }
         }
     }
@@ -252,7 +247,12 @@ fn draw_active_dot(grid: &Grid, debug_info: &DiffAlgoDebugInfo, painter: &Painte
     }
 }
 
-fn draw_active_paths(grid: &Grid, debug_info: &DiffAlgoDebugInfo, painter: &Painter, stroke: Stroke) {
+fn draw_active_paths(
+    grid: &Grid,
+    debug_info: &DiffAlgoDebugInfo,
+    painter: &Painter,
+    stroke: Stroke,
+) {
     for k_steps in &debug_info.steps {
         for step in k_steps.windows(2) {
             if step[0].0 < 0 || step[0].1 < 0 || step[1].0 < 0 || step[1].1 < 0 {
@@ -276,7 +276,12 @@ fn draw_active_paths(grid: &Grid, debug_info: &DiffAlgoDebugInfo, painter: &Pain
     }
 }
 
-fn draw_bounding_rect(grid: &Grid, debug_info: &DiffAlgoDebugInfo, painter: &Painter, stroke: Stroke) {
+fn draw_bounding_rect(
+    grid: &Grid,
+    debug_info: &DiffAlgoDebugInfo,
+    painter: &Painter,
+    stroke: Stroke,
+) {
     let left_px = grid.x_idx_to_pos(debug_info.left as usize) - grid.x_spacing() / 2.0;
     let right_px = grid.x_idx_to_pos(debug_info.right as usize) + grid.x_spacing() / 2.0;
     let top_px = grid.y_idx_to_pos(debug_info.top as usize) - grid.y_spacing() / 2.0;
@@ -351,11 +356,10 @@ impl eframe::App for DiffViz {
         egui::CentralPanel::default().show(ctx, |ui| {
             if ui.button("next").clicked()
                 && !self.finished
-                && self.algo.step(self.a.as_ref(), self.b.as_ref()) == DiffAlgoAction::Finish
+                && self.algo.step(self.a.as_ref(), self.b.as_ref()) == DiffAlgoState::Finished
             {
                 self.finished = true;
             }
-
 
             let available_size = ui.available_size();
             let rect = add_margin_to_rect(ui.allocate_space(available_size).1);
