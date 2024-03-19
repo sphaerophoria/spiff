@@ -530,7 +530,7 @@ impl DiffAlgo {
                     backwards_iter.map(local_to_global_xy).collect()
                 }
                 AlgoTrace::Forgetful(trace) => {
-                    let backwards_iter = MyersBackwardsIterator::new(self.d, self.d, x, y, trace);
+                    let backwards_iter = MyersBackwardsIterator::new(self.d, self.d - 1, x, y, trace);
                     backwards_iter.map(local_to_global_xy).collect()
                 }
             };
@@ -663,21 +663,24 @@ impl<T: MyersTrace> Iterator for MyersBackwardsIterator<'_, T> {
         let x = *self.trace.get_mut(self.d, self.k);
         let y = x - self.k;
 
-        let prev_x = resolve_x_for_d_k(self.trace, move_source.d, move_source.k);
-        let prev_y = prev_x - move_source.k;
+        if self.d > self.d_limit || self.d == 0 {
+            let prev_x = resolve_x_for_d_k(self.trace, move_source.d, move_source.k);
+            let prev_y = prev_x - move_source.k;
 
-        let x_diff = x - prev_x;
-        let y_diff = y - prev_y;
+            let x_diff = x - prev_x;
+            let y_diff = y - prev_y;
 
-        // If x and y have both changed by more than 1 element, we have a diagonal intermediate
-        // move to return
-        let traversal_diff = x_diff.min(y_diff);
-        if traversal_diff != 0 {
-            self.cached_xy = Some((x - traversal_diff, y - traversal_diff));
+            // If x and y have both changed by more than 1 element, we have a diagonal intermediate
+            // move to return
+            let traversal_diff = x_diff.min(y_diff);
+            if traversal_diff != 0 {
+                self.cached_xy = Some((x - traversal_diff, y - traversal_diff));
+            }
         }
 
         self.k = move_source.k;
         self.d -= 1;
+
         Some((x, y))
     }
 }
