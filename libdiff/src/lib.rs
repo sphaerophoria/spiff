@@ -123,7 +123,7 @@ impl fmt::Display for OverMemoryLimitError {
     }
 }
 
-fn get_prev_k<T: MyersTraceIf>(trace: &mut T, d: i64, k: i64) -> i64 {
+fn get_prev_k<T: MyersTrace>(trace: &mut T, d: i64, k: i64) -> i64 {
     if d == 0 {
         0
     } else if k == -d {
@@ -142,21 +142,21 @@ fn get_prev_k<T: MyersTraceIf>(trace: &mut T, d: i64, k: i64) -> i64 {
 }
 
 
-pub trait MyersTraceIf {
+pub trait MyersTrace {
     fn get_mut(&mut self, d: i64, k: i64) -> &mut i64;
 }
 
 #[derive(Debug)]
-pub struct MyersTrace {
+pub struct FullMyersTrace {
     data: Box<[i64]>,
 }
 
-impl MyersTrace {
+impl FullMyersTrace {
     fn new(
         a_len: usize,
         b_len: usize,
         max_mem_bytes: usize,
-    ) -> Result<MyersTrace, OverMemoryLimitError> {
+    ) -> Result<FullMyersTrace, OverMemoryLimitError> {
         let max_d = a_len + b_len;
 
         // k is iterated from [-d, d], on every other
@@ -184,13 +184,13 @@ impl MyersTrace {
                 maximum: max_mem_bytes,
             });
         }
-        Ok(MyersTrace {
+        Ok(FullMyersTrace {
             data: vec![0; num_slots].into(),
         })
     }
 }
 
-impl MyersTraceIf for MyersTrace {
+impl MyersTrace for FullMyersTrace {
     fn get_mut(&mut self, d: i64, k: i64) -> &mut i64 {
         // See new() for data layout
         // Indexing is the same logic as generation. Generate the pyramid for d - 1, then move over
@@ -225,7 +225,7 @@ impl ForgetfulMyersTrace {
     }
 }
 
-impl MyersTraceIf for ForgetfulMyersTrace {
+impl MyersTrace for ForgetfulMyersTrace {
     fn get_mut(&mut self, _d: i64, k: i64) -> &mut i64 {
         // k is in -d..d
         // data is in [0..2d +1
@@ -237,7 +237,7 @@ impl MyersTraceIf for ForgetfulMyersTrace {
 
 #[derive(Debug)]
 enum AlgoTrace {
-    Full(MyersTrace),
+    Full(FullMyersTrace),
     Forgetful(ForgetfulMyersTrace),
 }
 
@@ -301,7 +301,7 @@ impl DiffAlgo
         right: i64,
         max_memory_bytes: usize,
     ) -> Result<DiffAlgo, OverMemoryLimitError> {
-        let trace = MyersTrace::new(a.len(), b.len(), max_memory_bytes)?;
+        let trace = FullMyersTrace::new(a.len(), b.len(), max_memory_bytes)?;
         Ok(Self::new_with_trace(a, b, Direction::Forwards, top, left, bottom, right, AlgoTrace::Full(trace)))
     }
 
@@ -325,7 +325,7 @@ impl DiffAlgo
         bottom: i64,
         right: i64,
     ) -> DiffAlgo {
-        let trace = MyersTrace::new(a.len(), b.len(), 100 * 1024 * 1024).unwrap();
+        let trace = FullMyersTrace::new(a.len(), b.len(), 100 * 1024 * 1024).unwrap();
         Self::new_with_trace(a, b, Direction::Backwards, top, left, bottom, right, AlgoTrace::Full(trace))
     }
 
@@ -551,41 +551,6 @@ where
         prev_y = y;
     }
 
-    //for d in (0..=shortest_edit_distance).rev() {
-    //    let k = x - y;
-
-    //    let prev_k = get_prev_k(&mut trace, d, k);
-
-    //    let prev_x = if d == 0 {
-    //        0
-    //    } else {
-    //        *trace.get_mut(d - 1, prev_k)
-    //    };
-    //    let prev_y = prev_x - prev_k;
-
-    //    while x > prev_x && y > prev_y {
-    //        x -= 1;
-    //        y -= 1;
-    //        if y < 0 {
-    //            y = 0
-    //        };
-    //        builder.push_traversed_item(x as usize, y as usize);
-    //    }
-
-    //    if d > 0 {
-    //        if prev_y == y {
-    //            builder.push_removal(prev_x as usize);
-    //        } else if prev_x == x {
-    //            builder.push_insertion(prev_y as usize);
-    //        } else {
-    //            panic!();
-    //        }
-    //    }
-
-    //    x = prev_x;
-    //    y = prev_y;
-    //}
-
     builder.seq.reverse();
     Ok(builder.seq)
 }
@@ -600,7 +565,7 @@ struct MyersBackwardsIterator<'a, T> {
     trace: &'a mut T
 }
 
-impl<T: MyersTraceIf> MyersBackwardsIterator<'_, T> {
+impl<T: MyersTrace> MyersBackwardsIterator<'_, T> {
     fn new(d: i64, d_limit: i64, x: i64, y: i64, trace: &mut T) -> MyersBackwardsIterator<'_, T> {
         MyersBackwardsIterator {
             first_iter: true,
@@ -613,7 +578,7 @@ impl<T: MyersTraceIf> MyersBackwardsIterator<'_, T> {
     }
 }
 
-impl<T: MyersTraceIf> Iterator for MyersBackwardsIterator<'_, T> {
+impl<T: MyersTrace> Iterator for MyersBackwardsIterator<'_, T> {
     type Item = (i64, i64);
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -1673,7 +1638,7 @@ mod test {
 
     #[test]
     fn test_myers_trace() {
-        let mut trace = MyersTrace::new(2, 3, usize::MAX).expect("failed to generate trace");
+        let mut trace = FullMyersTrace::new(2, 3, usize::MAX).expect("failed to generate trace");
 
         assert_eq!(trace.data.len(), 6 + 5 + 4 + 3 + 2 + 1);
 

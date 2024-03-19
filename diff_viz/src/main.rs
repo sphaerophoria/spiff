@@ -1,6 +1,6 @@
-use libdiff::{DiffAlgo, DiffAlgoAction, DiffAlgoDebugInfo, MyersTrace};
-use eframe::{egui::{self, Galley, Vec2, TextStyle, Painter, Color32, Pos2, Ui}, epaint::Stroke};
-use std::{sync::Arc, rc::Rc, pin::Pin};
+use libdiff::{DiffAlgo, DiffAlgoAction};
+use eframe::{egui::{self, Galley, TextStyle, Painter, Color32, Pos2, Ui}, epaint::Stroke};
+use std::sync::Arc;
 
 struct Args {
     a: Vec<i32>,
@@ -33,6 +33,7 @@ impl Args {
                 output.push(v)
             }
         };
+
         while let Some(arg) = it.next() {
             match arg.as_ref() {
                 "--a" => {
@@ -103,7 +104,7 @@ impl Args {
 fn main() {
     let args = Args::parse(std::env::args());
     let native_options = eframe::NativeOptions::default();
-    eframe::run_native("My egui App", native_options, Box::new(|cc| Box::new(MyEguiApp::new(cc, args))));
+    eframe::run_native("My egui App", native_options, Box::new(|cc| Box::new(MyEguiApp::new(cc, args)))).unwrap();
 }
 
 fn lay_out_elems(elems: &[i32], ui: &Ui) -> Vec<Arc<Galley>> {
@@ -120,7 +121,7 @@ fn lay_out_elems(elems: &[i32], ui: &Ui) -> Vec<Arc<Galley>> {
 }
 
 fn draw_elem_at_pos(elem: &Arc<Galley>, pos: Pos2, painter: &Painter) {
-    painter.galley(pos, Arc::clone(&elem), Color32::WHITE);
+    painter.galley(pos, Arc::clone(elem), Color32::WHITE);
 }
 
 struct Grid {
