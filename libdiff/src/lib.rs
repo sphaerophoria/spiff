@@ -149,7 +149,6 @@ fn get_prev_k<T: MyersTrace>(trace: &mut T, d: i64, k: i64) -> i64 {
     }
 }
 
-
 pub trait MyersTrace {
     fn get_mut(&mut self, d: i64, k: i64) -> &mut i64;
 }
@@ -219,10 +218,7 @@ pub struct ForgetfulMyersTrace {
 }
 
 impl ForgetfulMyersTrace {
-    fn new(
-        a_len: usize,
-        b_len: usize,
-    ) -> ForgetfulMyersTrace {
+    fn new(a_len: usize, b_len: usize) -> ForgetfulMyersTrace {
         let max_distance = a_len + b_len;
         let num_slots = 2 * max_distance + 1;
 
@@ -235,8 +231,8 @@ impl ForgetfulMyersTrace {
 
 impl MyersTrace for ForgetfulMyersTrace {
     fn get_mut(&mut self, _d: i64, k: i64) -> &mut i64 {
-        // k is in -d..d
-        // data is in [0..2d +1
+        // k is in -d..=d
+        // data is in 0..=2d +1
         let idx = k + self.max_distance as i64;
         debug_assert!(idx < self.data.len() as i64 && idx >= 0);
         &mut self.data[idx as usize]
@@ -262,6 +258,7 @@ impl AlgoTrace {
 pub struct DiffAlgoDebugInfo {
     // steps[k][line_segment]
     pub steps: Vec<Vec<(i64, i64)>>,
+    // Limits
     pub top: i64,
     pub left: i64,
     pub bottom: i64,
@@ -275,7 +272,7 @@ pub enum DiffAlgoAction {
 }
 
 #[derive(Debug, Copy, Clone)]
-enum Direction {
+enum AlgoWalkDirection {
     Forwards,
     Backwards,
 }
@@ -283,23 +280,18 @@ enum Direction {
 #[derive(Debug)]
 pub struct DiffAlgo {
     max_distance: i64,
-    direction: Direction,
+    direction: AlgoWalkDirection,
     trace: AlgoTrace,
     d: i64,
     k: i64,
-    /// Search begin y
+    // Algo limits
     top: i64,
-    /// Search begin x
     left: i64,
-    /// Search end y
     bottom: i64,
-    /// Search end x
     right: i64,
-
 }
 
-impl DiffAlgo
-{
+impl DiffAlgo {
     pub fn new<U>(
         a: &[U],
         b: &[U],
@@ -310,7 +302,16 @@ impl DiffAlgo
         max_memory_bytes: usize,
     ) -> Result<DiffAlgo, OverMemoryLimitError> {
         let trace = FullMyersTrace::new(a.len(), b.len(), max_memory_bytes)?;
-        Ok(Self::new_with_trace(a, b, Direction::Forwards, top, left, bottom, right, AlgoTrace::Full(trace)))
+        Ok(Self::new_with_trace(
+            a,
+            b,
+            AlgoWalkDirection::Forwards,
+            top,
+            left,
+            bottom,
+            right,
+            AlgoTrace::Full(trace),
+        ))
     }
 
     pub fn new_forgetful<U>(
@@ -322,7 +323,16 @@ impl DiffAlgo
         right: i64,
     ) -> DiffAlgo {
         let trace = ForgetfulMyersTrace::new(a.len(), b.len());
-        Self::new_with_trace(a, b, Direction::Forwards, top, left, bottom, right, AlgoTrace::Forgetful(trace))
+        Self::new_with_trace(
+            a,
+            b,
+            AlgoWalkDirection::Forwards,
+            top,
+            left,
+            bottom,
+            right,
+            AlgoTrace::Forgetful(trace),
+        )
     }
 
     pub fn new_backwards<U>(
@@ -333,24 +343,30 @@ impl DiffAlgo
         bottom: i64,
         right: i64,
     ) -> DiffAlgo {
+        // FIXME: Backwards walk does not need full trace, however it is useful for debugging
         let trace = FullMyersTrace::new(a.len(), b.len(), 100 * 1024 * 1024).unwrap();
-        Self::new_with_trace(a, b, Direction::Backwards, top, left, bottom, right, AlgoTrace::Full(trace))
+        Self::new_with_trace(
+            a,
+            b,
+            AlgoWalkDirection::Backwards,
+            top,
+            left,
+            bottom,
+            right,
+            AlgoTrace::Full(trace),
+        )
     }
 
     fn new_with_trace<U>(
         a: &[U],
         b: &[U],
-        direction: Direction,
+        direction: AlgoWalkDirection,
         top: i64,
         left: i64,
         bottom: i64,
         right: i64,
-        trace: AlgoTrace
+        trace: AlgoTrace,
     ) -> DiffAlgo {
-        // Myers diff algorithm, no splitting into smaller segments
-        //
-        // http://www.xmailserver.org/diff2.pdf
-        // https://blog.jcoglan.com/2017/02/12/the-myers-diff-algorithm-part-1/
         assert!(bottom >= top);
         assert!(right >= left);
         assert!((0..=a.len() as i64).contains(&left));
@@ -374,16 +390,16 @@ impl DiffAlgo
         }
     }
 
-    pub fn x(&mut self, k: i64) -> i64 {
+    pub fn get_x(&mut self) -> i64 {
         if self.d == 0 {
             0
-        } else if k == -self.d {
-            *self.trace.get_mut(self.d - 1, k + 1)
-        } else if k == self.d {
-            *self.trace.get_mut(self.d - 1, k - 1) + 1
+        } else if self.k == -self.d {
+            *self.trace.get_mut(self.d - 1, self.k + 1)
+        } else if self.k == self.d {
+            *self.trace.get_mut(self.d - 1, self.k - 1) + 1
         } else {
-            let left = *self.trace.get_mut(self.d - 1, k - 1);
-            let right = *self.trace.get_mut(self.d - 1, k + 1);
+            let left = *self.trace.get_mut(self.d - 1, self.k - 1);
+            let right = *self.trace.get_mut(self.d - 1, self.k + 1);
             if left < right {
                 right
             } else {
@@ -396,16 +412,17 @@ impl DiffAlgo
         let a = &a[self.left as usize..self.right as usize];
         let b = &b[self.top as usize..self.bottom as usize];
 
+        // A backwards walk is the same as a forwards walk flipped over x=y
+        // If we just invert everything, all other code continues working for free
         let (left, right, top, bottom, a, b) = match self.direction {
-            Direction::Backwards => {
-                (self.top, self.bottom, self.left, self.right, b, a)
-            }
-            Direction::Forwards => {
-                (self.left, self.right, self.top, self.bottom, a, b)
-            }
+            AlgoWalkDirection::Backwards => (self.top, self.bottom, self.left, self.right, b, a),
+            AlgoWalkDirection::Forwards => (self.left, self.right, self.top, self.bottom, a, b),
         };
 
-
+        // The actual myers diff algorithm
+        //
+        // http://www.xmailserver.org/diff2.pdf
+        // https://blog.jcoglan.com/2017/02/12/the-myers-diff-algorithm-part-1/
         let mut x;
         let mut y;
         loop {
@@ -415,7 +432,7 @@ impl DiffAlgo
                 self.k = -self.d;
             }
 
-            x = self.x(self.k);
+            x = self.get_x();
 
             y = x - self.k;
             if x <= right - left && y <= bottom - top {
@@ -423,10 +440,13 @@ impl DiffAlgo
             }
             *self.trace.get_mut(self.d, self.k) = x;
         }
-        println!("d: {}, k: {}, x: {}, y: {}", self.d, self.k, x, y);
         assert!(y >= 0);
 
-        while x < a.len() as i64 && y < b.len() as i64 && extract_from_source(x, a, self.direction) == extract_from_source(y, b, self.direction) {
+        while x < a.len() as i64
+            && y < b.len() as i64
+            && extract_from_source(x, a, self.direction)
+                == extract_from_source(y, b, self.direction)
+        {
             x += 1;
             y += 1;
         }
@@ -437,11 +457,10 @@ impl DiffAlgo
             return DiffAlgoAction::Finish;
         }
 
-
         DiffAlgoAction::None
     }
 
-    pub fn debug_info<U>(&mut self, a: &[U], b: &[U]) -> DiffAlgoDebugInfo {
+    pub fn debug_info(&mut self) -> DiffAlgoDebugInfo {
         if self.k < -self.d || self.k > self.d {
             return DiffAlgoDebugInfo {
                 steps: Vec::new(),
@@ -449,7 +468,7 @@ impl DiffAlgo
                 left: self.left,
                 right: self.right,
                 bottom: self.bottom,
-            }
+            };
         }
         let mut steps = Vec::new();
 
@@ -460,16 +479,12 @@ impl DiffAlgo
 
             let x = *self.trace.get_mut(self.d, k);
             let y = x - k;
-            let local_to_global_xy = |(mut x, mut y)| {
-                match self.direction {
-                    Direction::Forwards => {
-                        (x + self.left, y + self.top)
-                    }
-                    Direction::Backwards => {
-                        x = self.bottom - x;
-                        y = self.right - y;
-                        (y, x)
-                    }
+            let local_to_global_xy = |(mut x, mut y)| match self.direction {
+                AlgoWalkDirection::Forwards => (x + self.left, y + self.top),
+                AlgoWalkDirection::Backwards => {
+                    x = self.bottom - x;
+                    y = self.right - y;
+                    (y, x)
                 }
             };
 
@@ -498,10 +513,10 @@ impl DiffAlgo
     }
 }
 
-fn extract_from_source<U>(pos: i64, source: &[U], direction: Direction) -> &U {
+fn extract_from_source<U>(pos: i64, source: &[U], direction: AlgoWalkDirection) -> &U {
     match direction {
-        Direction::Forwards => &source[pos as usize],
-        Direction::Backwards => &source[source.len() - pos as usize - 1],
+        AlgoWalkDirection::Forwards => &source[pos as usize],
+        AlgoWalkDirection::Backwards => &source[source.len() - pos as usize - 1],
     }
 }
 
@@ -530,7 +545,7 @@ where
     while algo.step(a, b) != DiffAlgoAction::Finish {}
 
     let shortest_edit_distance = algo.d;
-    let mut trace = algo.trace;
+    let trace = algo.trace;
     let AlgoTrace::Full(mut trace) = trace else {
         panic!("Unexpected forgetful trace");
     };
@@ -546,14 +561,13 @@ where
     let mut prev_x = last.0;
     let mut prev_y = last.1;
     for (x, y) in it {
-        println!("x: {x}, y: {y}");
-        assert!( x >= 0 && y >= 0);
+        assert!(x >= 0 && y >= 0);
         if prev_y == y {
             builder.push_removal(x as usize);
         } else if prev_x == x {
             builder.push_insertion(y as usize);
         } else {
-            let length = prev_x -x ;
+            let length = prev_x - x;
             builder.push_traversed_item(x as usize, y as usize, length as usize);
         }
         prev_x = x;
@@ -570,7 +584,7 @@ struct MyersBackwardsIterator<'a, T> {
     d: i64,
     k: i64,
     cached_xy: Option<(i64, i64)>,
-    trace: &'a mut T
+    trace: &'a mut T,
 }
 
 impl<T: MyersTrace> MyersBackwardsIterator<'_, T> {
@@ -582,25 +596,6 @@ impl<T: MyersTrace> MyersBackwardsIterator<'_, T> {
             k,
             cached_xy: None,
             trace,
-        }
-    }
-
-    fn current_state_diagonal_x_end(&mut self) -> Option<i64> {
-        if self.d == self.d_limit {
-            return None;
-        }
-        // If x distance is 0, or y distance is 0
-        let x = *self.trace.get_mut(self.d, self.k);
-        let prev_k = get_prev_k(self.trace, self.d, self.k);
-        let prev_x = get_prev_x(self.trace, self.d - 1, prev_k);
-        let prev_y = prev_x - prev_k;
-        let y = x - self.k;
-        let x_diff = x - prev_x;
-        let y_diff = y - prev_y;
-        if x_diff == 0 || y_diff == 0 {
-            None
-        } else {
-            Some(prev_x)
         }
     }
 }
@@ -638,6 +633,8 @@ impl<T: MyersTrace> Iterator for MyersBackwardsIterator<'_, T> {
         let x_diff = x - prev_x;
         let y_diff = y - prev_y;
 
+        // If x and y have both changed by more than 1 element, we have a diagonal intermediate
+        // move to return
         let traversal_diff = x_diff.min(y_diff);
         if traversal_diff != 0 {
             self.cached_xy = Some((x - traversal_diff, y - traversal_diff));
