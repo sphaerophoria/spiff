@@ -13,6 +13,7 @@ struct Args {
     left: Option<usize>,
     right: Option<usize>,
     linear: bool,
+    max_memory_bytes: usize,
     forgetful: bool,
     backwards: bool,
 }
@@ -28,6 +29,7 @@ impl Args {
         let mut right = None;
         let mut forgetful = false;
         let mut backwards = false;
+        let mut max_memory_bytes = None;
         let mut linear = false;
         let mut a = Vec::new();
         let mut b = Vec::new();
@@ -54,6 +56,7 @@ impl Args {
                 "--forgetful" => forgetful = true,
                 "--backwards" => backwards = true,
                 "--linear" => linear = true,
+                "--max-memory-bytes" => max_memory_bytes = it.next(),
                 "--help" => {
                     Self::help(&program_name);
                 }
@@ -78,6 +81,7 @@ impl Args {
             let left = parse_arg!(left);
             let right = parse_arg!(right);
             let bottom = parse_arg!(bottom);
+            let max_memory_bytes = parse_arg!(max_memory_bytes).unwrap_or(100 * 1024 * 1024);
 
             if backwards && forgetful {
                 return Err("forgetful cannot be set in backwards mode");
@@ -95,6 +99,7 @@ impl Args {
                 forgetful,
                 backwards,
                 linear,
+                max_memory_bytes,
                 a,
                 b,
             })
@@ -117,7 +122,9 @@ impl Args {
                 --left: Search start in a\n\
                 --bottom: Search end in b\n\
                 --right: Search end in a\n\
-                --forgetful: Use forgetful version of algo"
+                --forgetful: Use forgetful version of algo\n\
+                --linear: Run it backwards and forwards\n\
+                --max-memory-bytes: Memory limit"
         );
         std::process::exit(1);
     }
@@ -165,10 +172,8 @@ fn construct_diff_algo(args: &Args) -> GuiDiffAlgo {
     let right = args.right.unwrap_or(args.a.len()) as i64;
     let bottom = args.bottom.unwrap_or(args.b.len()) as i64;
 
-    const MAX_MEM_BYTES: usize = 100 * 1024 * 1024; // 100MB
-
     if args.linear {
-        GuiDiffAlgo::Linear(LinearDiffAlgo::new(args.a.as_ref(), args.b.as_ref(), top, left, bottom, right, MAX_MEM_BYTES))
+        GuiDiffAlgo::Linear(LinearDiffAlgo::new(args.a.as_ref(), args.b.as_ref(), top, left, bottom, right, args.max_memory_bytes))
     }
     else if args.backwards {
         GuiDiffAlgo::Full(DiffAlgo::new_backwards(args.a.as_ref(), args.b.as_ref(), top, left, bottom, right))
@@ -182,7 +187,7 @@ fn construct_diff_algo(args: &Args) -> GuiDiffAlgo {
             left,
             bottom,
             right,
-            MAX_MEM_BYTES
+            args.max_memory_bytes
         )
         .unwrap())
     }
