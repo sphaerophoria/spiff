@@ -297,6 +297,7 @@ enum AlgoTrace {
 
 impl MyersTrace for AlgoTrace {
     fn get_mut(&mut self, d: i64, k: i64) -> &mut i64 {
+        assert_eq!((d % 2).abs(), (k % 2).abs());
         match self {
             AlgoTrace::Full(x) => x.get_mut(d, k),
             AlgoTrace::Forgetful(x) => x.get_mut(d, k),
@@ -377,7 +378,10 @@ fn split_rect_at_point(rect: &Rect, point: (i64, i64)) -> (Rect, Rect) {
         },
 
     )
+}
 
+fn is_even(x: i64) -> bool {
+    x % 2 == 0
 }
 
 struct SnakingState {
@@ -394,14 +398,6 @@ struct SnakingState {
     max_memory_bytes: usize,
 }
 
-
-// 1 box --> too much memory man
-// run forwards and backwards on big box
-// 2 boxes --> too much memory man
-// Pick bigger box man
-// Forwards and backwards for big box
-// Find new snake point
-// 3 boxes --> too much memory man
 
 impl SnakingState {
     // FIXME: Bool return maybe not the best
@@ -423,7 +419,13 @@ impl SnakingState {
             if backwards_k < -self.backwards.d || backwards_k > self.backwards.d {
                 continue;
             }
-            let backwards_x_val = *self.backwards.trace.get_mut(self.forwards.d, backwards_k);
+
+            let backwards_x_val = if is_even(self.forwards.d) != is_even(backwards_k) {
+                *self.backwards.trace.get_mut(self.forwards.d - 1, backwards_k)
+            } else {
+                *self.backwards.trace.get_mut(self.forwards.d, backwards_k)
+            };
+
             let backwards_x_val = backwards_x_val - backwards_k;
             let backwards_x_val = self.backwards.right - self.backwards.left - backwards_x_val;
 
@@ -436,11 +438,20 @@ impl SnakingState {
                 // move on
                 // Adjust rectangles into smaller ones
 
-                let meeting_point  = (forwards_x_val + self.rois[self.current_idx].left, forwards_x_val - k + self.rois[self.current_idx].top);
-                self.meeting_points.insert(self.current_idx, meeting_point);
+                let meeting_point  = (backwards_x_val + self.rois[self.current_idx].left, backwards_x_val - k + self.rois[self.current_idx].top);
+                println!("current_roi: {:?}", self.rois[self.current_idx]);
                 println!("meeting point: {:?}", meeting_point);
 
                 let (new_forwards_roi, new_backwards_roi) = split_rect_at_point(&self.rois[self.current_idx], meeting_point);
+                // FIXME: Ugly condition
+                if meeting_point == (self.rois[self.current_idx].right, self.rois[self.current_idx].bottom) ||
+                    (new_forwards_roi.width() == 0 && new_forwards_roi.height() == 0) ||
+                    (new_backwards_roi.width() == 0 && new_backwards_roi.height() == 0) {
+                    // Maximum memory usage is just a suggestion :)
+                    return SnakingStateResponse::Finished(&self.meeting_points)
+                }
+
+                self.meeting_points.insert(self.current_idx, meeting_point);
                 self.rois[self.current_idx] = new_forwards_roi;
                 self.rois.insert(self.current_idx + 1, new_backwards_roi);
                 println!("rois: {:?}", self.rois);
@@ -536,18 +547,21 @@ impl LinearDiffAlgo {
     pub fn step<U: PartialEq>(&mut self, a: &[U], b: &[U]) -> bool {
         match &mut self.inner {
             LinearAlgoState::Snaking(snaking_state) => {
-                let max_memory_bytes = snaking_state.max_memory_bytes;
                 if let SnakingStateResponse::Finished(meeting_points) = snaking_state.step(a, b) {
                     // FIXME: max mem should be propagated
                     let mut algos = Vec::with_capacity(meeting_points.len() + 1);
                     let (mut prev_x, mut prev_y) = (0, 0);
 
+                    // At this point we've done our best to reduce memory usage. If we are still
+                    // over the requested limit we treat it as a suggestion and continue on
+                    const MAX_MEM_USAGE: usize = usize::MAX;
+
                     for (x, y) in meeting_points {
-                        algos.push(DiffAlgo::new(a, b, prev_y, prev_x, *y, *x, max_memory_bytes).unwrap());
+                        algos.push(DiffAlgo::new(a, b, prev_y, prev_x, *y, *x, MAX_MEM_USAGE).unwrap());
                         prev_y = *y;
                         prev_x = *x;
                     }
-                    algos.push(DiffAlgo::new(a, b, prev_y, prev_x, b.len() as i64, a.len() as i64, max_memory_bytes).unwrap());
+                    algos.push(DiffAlgo::new(a, b, prev_y, prev_x, b.len() as i64, a.len() as i64, MAX_MEM_USAGE).unwrap());
 
                     self.inner = LinearAlgoState::Backtracking {
                         algos,
