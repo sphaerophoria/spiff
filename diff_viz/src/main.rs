@@ -432,12 +432,25 @@ impl eframe::App for DiffViz {
                     for (info, color) in debug_info.infos.iter().zip(colors.iter().cycle()) {
                         render_algo_state(&grid, info, stroke, painter, *color);
                     }
+
                     if let Some(meeting_point) = debug_info.meeting_point {
                         if meeting_point.0 >= 0 && meeting_point.1 >= 0 {
                             let x_pos = grid.x_idx_to_pos(meeting_point.0 as usize);
                             let y_pos = grid.y_idx_to_pos(meeting_point.1 as usize);
                             painter.circle_filled(egui::pos2(x_pos, y_pos), CIRCLE_RADIUS, Color32::from_rgba_unmultiplied(255, 0, 255, 255));
                         }
+                    }
+
+                    for connection in debug_info.connections {
+                        let mut stroke = stroke;
+                        stroke.color = Color32::GREEN;
+
+                        let start_x = grid.x_idx_to_pos(connection.0.0 as usize);
+                        let end_x = grid.x_idx_to_pos(connection.1.0 as usize);
+
+                        let start_y = grid.y_idx_to_pos(connection.0.1 as usize);
+                        let end_y = grid.y_idx_to_pos(connection.1.1 as usize);
+                        painter.line_segment([egui::pos2(start_x, start_y), egui::pos2(end_x, end_y)], stroke);
                     }
                 }
             }
