@@ -2,7 +2,7 @@ use eframe::{
     egui::{self, Color32, Galley, Painter, Pos2, Rect, TextStyle, Ui},
     epaint::Stroke,
 };
-use libdiff::{LinearDiffAlgo, DiffAlgo, DiffAlgoDebugInfo, DiffAlgoActionTaken};
+use libdiff::{LinearDiffAlgo, DiffAlgo, DiffAlgoDebugInfo, DiffAlgoActionTaken, LinearAlgoResponse};
 use std::sync::Arc;
 
 struct Args {
@@ -396,8 +396,10 @@ impl eframe::App for DiffViz {
                         }
                     }
                     GuiDiffAlgo::Linear(x) => {
-                        if x.step(&self.a, &self.b) {
-                            self.finished = true;
+                        match x.step(&self.a, &self.b) {
+                            LinearAlgoResponse::None => (),
+                            LinearAlgoResponse::Finished => self.finished = true,
+                            LinearAlgoResponse::OverMemoryLimit(required) => self.finished = true,
                         }
                     }
                 }

@@ -341,6 +341,7 @@ pub struct LinearAlgoDebugInfo {
 
 enum SnakingStateResponse<'a> {
     Finished(&'a [Rect]),
+    OverMemoryLimit(usize),
     None,
 }
 
@@ -453,8 +454,8 @@ impl SnakingState {
 
                 if (new_forwards_roi.width() == 0 && new_forwards_roi.height() == 0) ||
                     (new_backwards_roi.width() == 0 && new_backwards_roi.height() == 0) {
-                    // Maximum memory usage is just a suggestion :)
-                    return SnakingStateResponse::Finished(&self.rois)
+                    let required_mem = self.rois.iter().map(|r| calc_full_trace_mem_usage_bytes(r.width(), r.height())).sum();
+                    return SnakingStateResponse::OverMemoryLimit(required_mem);
                 }
 
                 self.rois[self.current_idx] = new_forwards_roi;
@@ -498,6 +499,12 @@ enum LinearAlgoState {
         algos: Vec<DiffAlgo>,
         current_idx: usize,
     },
+}
+
+pub enum LinearAlgoResponse {
+    Finished,
+    OverMemoryLimit(usize),
+    None,
 }
 
 // FIXME: Myabe merge with DiffAlgo
@@ -548,37 +555,46 @@ impl LinearDiffAlgo {
 
     }
 
-    pub fn step<U: PartialEq>(&mut self, a: &[U], b: &[U]) -> bool {
+    pub fn step<U: PartialEq>(&mut self, a: &[U], b: &[U]) -> LinearAlgoResponse {
         match &mut self.inner {
             LinearAlgoState::Snaking(snaking_state) => {
-                if let SnakingStateResponse::Finished(rois) = snaking_state.step(a, b) {
-                    // FIXME: max mem should be propagated
-                    let mut algos = Vec::with_capacity(rois.len());
+                match snaking_state.step(a, b) {
+                    SnakingStateResponse::Finished(rois) => {
+                        // FIXME: max mem should be propagated
+                        let mut algos = Vec::with_capacity(rois.len());
 
-                    // At this point we've done our best to reduce memory usage. If we are still
-                    // over the requested limit we treat it as a suggestion and continue on
-                    const MAX_MEM_USAGE: usize = usize::MAX;
+                        // At this point we've done our best to reduce memory usage. If we are still
+                        // over the requested limit we treat it as a suggestion and continue on
+                        const MAX_MEM_USAGE: usize = usize::MAX;
 
-                    for roi in rois {
-                        algos.push(DiffAlgo::new(a, b, roi.top, roi.left, roi.bottom, roi.right, MAX_MEM_USAGE).unwrap());
+                        for roi in rois {
+                            algos.push(DiffAlgo::new(a, b, roi.top, roi.left, roi.bottom, roi.right, MAX_MEM_USAGE).unwrap());
+                        }
+
+                        self.inner = LinearAlgoState::Backtracking {
+                            algos,
+                            current_idx: 0,
+                        };
+                        LinearAlgoResponse::None
+                    }
+                    SnakingStateResponse::OverMemoryLimit(required) => {
+                        LinearAlgoResponse::OverMemoryLimit(required)
+                    }
+                    SnakingStateResponse::None => {
+                        LinearAlgoResponse::None
                     }
 
-                    self.inner = LinearAlgoState::Backtracking {
-                        algos,
-                        current_idx: 0,
-                    };
                 }
-                false
             }
             LinearAlgoState::Backtracking { algos, current_idx }  => {
                 if *current_idx >= algos.len() {
-                    return true
+                    return LinearAlgoResponse::Finished
                 }
 
                 if algos[*current_idx].step(a, b) == DiffAlgoActionTaken::Finished {
                     *current_idx += 1;
                 }
-                false
+                LinearAlgoResponse::None
             }
         }
     }
@@ -872,7 +888,14 @@ pub fn diff<U: PartialEq>(
     max_memory_bytes: usize,
 ) -> Result<Vec<DiffAction>, OverMemoryLimitError> {
     let mut algo = LinearDiffAlgo::new(a, b, 0, 0, b.len() as i64, a.len() as i64, max_memory_bytes);
-    while !algo.step(a, b) {}
+
+    loop {
+        match algo.step(a, b) {
+            LinearAlgoResponse::None => (),
+            LinearAlgoResponse::Finished => break,
+            LinearAlgoResponse::OverMemoryLimit(required) => return Err(OverMemoryLimitError { required, maximum: max_memory_bytes }),
+        }
+    }
 
     let mut builder = DiffBuilder::default();
     // FIXME: What the fuck abstraction violation

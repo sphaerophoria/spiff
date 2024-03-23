@@ -53,7 +53,7 @@ impl Default for DiffOptions {
             track_moves: true,
             line_numbers: true,
             view_mode: ViewMode::Unified,
-            max_memory_mb: 100,
+            max_memory_mb: 1,
         }
     }
 }
